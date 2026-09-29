@@ -5,3 +5,4 @@ pydantic-settings==2.15.0
 numpy==2.5.3
 pypdf==6.19.0
 norminette==3.3.60
+tzdata==2026.4

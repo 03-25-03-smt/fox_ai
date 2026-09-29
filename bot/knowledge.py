@@ -60,12 +60,18 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
 
 
 def read_document(path: Path) -> str:
-    if path.suffix.lower() == ".pdf":
+    return read_document_bytes(path.name, path.read_bytes())
+
+
+def read_document_bytes(name: str, data: bytes) -> str:
+    if name.lower().endswith(".pdf"):
+        import io
+
         from pypdf import PdfReader
 
-        reader = PdfReader(str(path))
+        reader = PdfReader(io.BytesIO(data))
         return "\n\n".join(page.extract_text() or "" for page in reader.pages)
-    return path.read_text(encoding="utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace")
 
 
 class KnowledgeBase:

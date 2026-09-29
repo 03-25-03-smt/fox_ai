@@ -5,21 +5,51 @@ import logging
 
 from aiogram import Bot, Dispatcher
 
+from .app import App, GpuQueue
 from .assistant import Assistant
 from .config import Settings
 from .db import Database
+from .docs import PersonalDocs
 from .handlers import BOT_COMMANDS, build_router
+from .intra import IntraClient
 from .knowledge import KnowledgeBase
 from .llm import OllamaClient
 from .memory import MemoryStore
+from .services import ImageClient, SandboxClient, SpeechClient
+from .tasks import start_background
 from .web import WebTools
 
 log = logging.getLogger("fox_ai")
 
 
-async def _initial_index(knowledge: KnowledgeBase) -> None:
+def build_app(settings: Settings, db: Database) -> App:
+    llm = OllamaClient(settings.ollama_url, settings.request_timeout, settings.num_ctx)
+    web = WebTools(settings.searxng_url) if settings.web_enabled else None
+    assistant = Assistant(
+        settings, llm, db,
+        MemoryStore(db, llm, settings.embed_model),
+        KnowledgeBase(db, llm, settings.embed_model, settings.knowledge_dir),
+        web,
+        PersonalDocs(db, llm, settings.embed_model),
+    )
+    intra = None
+    if settings.intra_enabled:
+        intra = IntraClient(settings.intra_client_id, settings.intra_client_secret.get_secret_value())
+    return App(
+        settings=settings,
+        db=db,
+        assistant=assistant,
+        sandbox=SandboxClient(settings.sandbox_url) if settings.sandbox_url else None,
+        speech=SpeechClient(settings.speech_url) if settings.speech_url else None,
+        imagegen=ImageClient(settings.imagegen_url) if settings.imagegen_url else None,
+        intra=intra,
+        queue=GpuQueue(settings.max_concurrent),
+    )
+
+
+async def _initial_index(app: App) -> None:
     try:
-        stats = await knowledge.reindex()
+        stats = await app.assistant.knowledge.reindex()
         log.info("knowledge: %s", stats)
     except Exception:
         log.exception("knowledge: initial indexing failed")
@@ -36,32 +66,28 @@ async def main() -> None:
 
     db = Database(settings.db_path)
     await db.connect()
-    llm = OllamaClient(settings.ollama_url, settings.request_timeout, settings.num_ctx)
-    web = WebTools(settings.searxng_url) if settings.web_enabled else None
-    memory = MemoryStore(db, llm, settings.embed_model)
-    knowledge = KnowledgeBase(db, llm, settings.embed_model, settings.knowledge_dir)
-    assistant = Assistant(settings, llm, db, memory, knowledge, web)
+    app = build_app(settings, db)
 
     bot = Bot(settings.bot_token.get_secret_value())
-    # Эти объекты автоматически передаются в хендлеры по имени аргумента
-    dp = Dispatcher(db=db, assistant=assistant, settings=settings)
-    dp.include_router(build_router(db, settings.admins))
+    me = await bot.me()
+    app.bot_username = me.username or ""
+    # app автоматически передаётся в хендлеры по имени аргумента
+    dp = Dispatcher(app=app)
+    dp.include_router(build_router(app))
 
-    index_task = asyncio.create_task(_initial_index(knowledge))
+    app.spawn(_initial_index(app))
+    start_background(bot, app)
     try:
         await bot.set_my_commands(BOT_COMMANDS)
-        log.info(
-            "Fox AI запущен. Ollama: %s, модель: %s, эмбеддинги: %s, интернет: %s",
-            settings.ollama_url, settings.default_model, settings.embed_model,
-            "вкл" if web else "выкл",
-        )
+        enabled = [name for name, on in (
+            ("интернет", app.assistant.web), ("песочница", app.sandbox), ("речь", app.speech),
+            ("картинки", app.imagegen), ("интра", app.intra), ("бэкапы", settings.backup_dir),
+        ) if on]
+        log.info("Fox AI (@%s) запущен. Ollama: %s, модель: %s. Включено: %s",
+                 app.bot_username, settings.ollama_url, settings.default_model, ", ".join(enabled) or "—")
         await dp.start_polling(bot)
     finally:
-        index_task.cancel()
-        if web:
-            await web.close()
-        await llm.close()
-        await db.close()
+        await app.close()
         await bot.session.close()
 
 

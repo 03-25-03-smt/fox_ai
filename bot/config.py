@@ -22,34 +22,58 @@ class Settings(BaseSettings):
     bot_token: SecretStr
     admin_ids: str = ""
 
-    # LLM
+    # --- LLM ---
     ollama_url: str = "http://localhost:11434"
-    default_model: str = "qwen2.5:7b"
+    default_model: str = "qwen2.5:7b"  # универсальная модель
+    auto_model: bool = True  # если пользователь не выбрал модель — выбирать по запросу
+    code_model: str = "qwen2.5-coder:14b"  # для кода (автовыбор)
+    fast_model: str = "qwen2.5:3b"  # для коротких реплик, фактов, резюме, перевода
+    vision_model: str = "qwen2.5vl:7b"  # для фото
     default_mode: str = "chat"
     history_limit: int = 20
+    summary_batch: int = 10  # сколько старых сообщений сворачивать в резюме за раз
     request_timeout: float = 600.0
     num_ctx: int = 8192  # контекст модели в токенах; больше = больше VRAM
 
-    # Хранилище
+    # --- Хранилище ---
     db_path: str = "data/fox_ai.sqlite3"
+    timezone: str = "Europe/Paris"  # часовой пояс по умолчанию (напоминания, дата в промпте)
 
-    # Эмбеддинги (память и база знаний)
+    # --- Эмбеддинги, память, база знаний, личные документы ---
     embed_model: str = "bge-m3"
-
-    # Долговременная память
     memory_auto: bool = True
-    memory_model: str = ""  # пусто = модель пользователя
+    memory_model: str = ""  # пусто = FAST_MODEL
     memory_top_k: int = 5
     memory_min_score: float = 0.45
-
-    # База знаний (Norm, subjects)
     knowledge_dir: str = "knowledge"
     knowledge_top_k: int = 4
     knowledge_min_score: float = 0.4
+    docs_top_k: int = 3
+    docs_min_score: float = 0.4
 
-    # Интернет
+    # --- Интернет ---
     searxng_url: str = ""  # пусто = интернет выключен
     max_tool_steps: int = 3
+
+    # --- Внешние сервисы (пусто = выключено) ---
+    sandbox_url: str = ""  # песочница для запуска C-кода
+    speech_url: str = ""  # распознавание и синтез речи
+    imagegen_url: str = ""  # генерация картинок
+
+    # --- 42 intra API (https://profile.intra.42.fr/oauth/applications) ---
+    intra_client_id: str = ""
+    intra_client_secret: SecretStr = SecretStr("")
+    intra_check_hour: int = 10  # во сколько проверять blackhole (локальное время)
+
+    # --- Лимиты ---
+    daily_limit: int = 0  # запросов к моделям в день на пользователя (0 = без лимита, админам не действует)
+    max_concurrent: int = 2  # одновременных генераций на GPU, остальные ждут в очереди
+
+    # --- Мониторинг и бэкапы ---
+    gpu_temp_alert: int = 85  # °C, выше — предупреждение админам
+    backup_dir: str = ""  # пусто = бэкапы выключены
+    backup_keep: int = 14
+    backup_hour: int = 4
 
     @property
     def admins(self) -> frozenset[int]:
@@ -58,3 +82,12 @@ class Settings(BaseSettings):
     @property
     def web_enabled(self) -> bool:
         return bool(self.searxng_url)
+
+    @property
+    def intra_enabled(self) -> bool:
+        return bool(self.intra_client_id and self.intra_client_secret.get_secret_value())
+
+    @property
+    def helper_model(self) -> str:
+        """Маленькая модель для служебных задач."""
+        return self.memory_model or self.fast_model or self.default_model

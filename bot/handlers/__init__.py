@@ -1,0 +1,55 @@
+"""Сборка роутеров Telegram."""
+
+from aiogram import F, Router
+from aiogram.types import BotCommand, Message
+
+from ..access import AccessMiddleware
+from ..app import App
+from . import admin, chat, code42, files, settings, tools
+
+BOT_COMMANDS = [
+    BotCommand(command="mode", description="Режим: общение / 42 / защита"),
+    BotCommand(command="model", description="Выбрать модель"),
+    BotCommand(command="settings", description="Температура, длина, голос"),
+    BotCommand(command="persona", description="Роль бота"),
+    BotCommand(command="run", description="Запустить последний код"),
+    BotCommand(command="valgrind", description="Запустить под valgrind"),
+    BotCommand(command="tests", description="Сгенерировать и прогнать тесты"),
+    BotCommand(command="project", description="Проверить проект (git-ссылка)"),
+    BotCommand(command="defense", description="Тренировка защиты"),
+    BotCommand(command="norm", description="Проверить код norminette"),
+    BotCommand(command="42", description="Мой профиль в интре"),
+    BotCommand(command="search", description="Найти в интернете"),
+    BotCommand(command="draw", description="Нарисовать картинку"),
+    BotCommand(command="remind", description="Напоминание"),
+    BotCommand(command="reminders", description="Мои напоминания"),
+    BotCommand(command="memories", description="Что бот обо мне помнит"),
+    BotCommand(command="docs", description="Мои документы"),
+    BotCommand(command="reset", description="Очистить текущий диалог"),
+    BotCommand(command="whoami", description="Мои настройки"),
+    BotCommand(command="help", description="Помощь"),
+]
+
+
+async def on_unknown_command(message: Message) -> None:
+    await message.answer("Не знаю такую команду. /help")
+
+
+async def on_unsupported(message: Message) -> None:
+    await message.answer("Понимаю текст, голосовые, фото и файлы (.c/.h/.zip/.pdf/.txt/.md) 🙂")
+
+
+def build_router(app: App) -> Router:
+    root = Router(name="fox_ai")
+    access = AccessMiddleware(app)
+    root.message.outer_middleware(access)
+    root.callback_query.outer_middleware(access)
+
+    for module in (settings, admin, tools, code42, files, chat):
+        root.include_router(module.router.build())
+    fallback = Router(name="fallback")
+    fallback.message.register(chat.on_text, F.text & ~F.text.startswith("/"))
+    fallback.message.register(on_unknown_command, F.text.startswith("/"))
+    fallback.message.register(on_unsupported, ~F.new_chat_members & ~F.left_chat_member)
+    root.include_router(fallback)
+    return root

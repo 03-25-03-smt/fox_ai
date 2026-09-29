@@ -1,9 +1,10 @@
-"""Общие фейки для тестов: LLM без GPU и веб без сети."""
+"""Общие фейки для тестов: LLM без GPU, веб без сети, внешние сервисы."""
 
 import hashlib
 import re
 
-from bot.llm import StreamChunk, ToolsNotSupported
+from bot.llm import LoadedModel, StreamChunk, ToolsNotSupported
+from bot.services import ProcResult, RunResult
 from bot.web import SearchResult
 
 DIM = 64
@@ -22,16 +23,25 @@ class FakeLLM:
     def __init__(self, reply: str = "Ответ с кодом:\n```c\nint main(void);\n```") -> None:
         self.reply = reply
         self.calls: list[dict] = []
+        self.chat_calls: list[dict] = []
         # Сценарий инструментов: список списков tool_calls по шагам
         self.tool_script: list[list[dict]] = []
         self.supports_tools = True
         self.facts_json = '{"facts": []}'
+        self.chat_reply = "резюме диалога"
+        self.models = ["bge-m3:latest", "llama3.1:8b", "qwen2.5-coder:14b", "qwen2.5:3b",
+                       "qwen2.5:7b", "qwen2.5vl:7b"]
+        self.speeds = []
 
-    async def list_models(self) -> list[str]:
-        return ["bge-m3:latest", "llama3.1:8b", "qwen2.5:7b"]
+    async def list_models(self, cached: bool = False) -> list[str]:
+        return list(self.models)
 
-    async def chat_stream(self, model, messages, tools=None):
-        self.calls.append({"model": model, "messages": [dict(m) for m in messages], "tools": tools})
+    async def loaded_models(self):
+        return [LoadedModel("qwen2.5:7b", 5 * 1024**3, 5 * 1024**3)]
+
+    async def chat_stream(self, model, messages, tools=None, options=None):
+        self.calls.append({"model": model, "messages": [dict(m) for m in messages],
+                           "tools": tools, "options": options})
         if tools and not self.supports_tools:
             raise ToolsNotSupported("model does not support tools")
         if tools and self.tool_script:
@@ -40,11 +50,15 @@ class FakeLLM:
         for part in self.reply.split(" "):
             yield StreamChunk(part + " ")
 
-    async def chat(self, model, messages, json_mode=False):
-        return self.facts_json
+    async def chat(self, model, messages, json_mode=False, options=None):
+        self.chat_calls.append({"model": model, "messages": messages, "json": json_mode})
+        return self.facts_json if json_mode else self.chat_reply
 
     async def embed(self, model, texts):
         return [fake_vector(t) for t in texts]
+
+    async def close(self) -> None:
+        pass
 
 
 class FakeWeb:
@@ -59,6 +73,72 @@ class FakeWeb:
     async def fetch(self, url: str):
         self.fetched.append(url)
         return "Page title", "Page body text"
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeSandbox:
+    def __init__(self) -> None:
+        self.runs: list[dict] = []
+        self.projects: list[dict] = []
+        self.result = RunResult(
+            compiled=True, compile_command="cc -Wall -Wextra -Werror main.c -o fox_prog",
+            compile_output="", valgrind_log=None,
+            run=ProcResult(exit_code=0, signal=None, timed_out=False, stdout="hi\n", stderr="", duration_ms=3),
+        )
+        self.project_report = {
+            "files": ["Makefile", "main.c"],
+            "norminette": {"ok": True, "errors": 0, "files_checked": 1, "output": ""},
+            "makefile": {"exists": True, "path": "Makefile", "rules": {}, "has_name": True,
+                         "uses_wildcard": False, "has_flags": True, "issues": []},
+            "build": {"attempted": True, "ok": True, "output": "", "relinks": False, "relink_output": ""},
+        }
+
+    async def run(self, files, **kwargs):
+        self.runs.append({"files": files, **kwargs})
+        return self.result
+
+    async def check_project(self, files):
+        self.projects.append(files)
+        return self.project_report
+
+    async def health(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeSpeech:
+    def __init__(self, text: str = "напомни через 10 минут выключить плиту") -> None:
+        self.text = text
+        self.synthesized: list[str] = []
+
+    async def transcribe(self, audio: bytes, filename: str = "voice.ogg") -> str:
+        return self.text
+
+    async def synthesize(self, text: str) -> bytes:
+        self.synthesized.append(text)
+        return b"OggS-fake"
+
+    async def health(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeImages:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def generate(self, prompt: str, seed=None) -> bytes:
+        self.prompts.append(prompt)
+        return b"\x89PNG-fake"
+
+    async def health(self) -> bool:
+        return False
 
     async def close(self) -> None:
         pass

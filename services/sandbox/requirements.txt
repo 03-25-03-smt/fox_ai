@@ -1,0 +1,3 @@
+fastapi==0.141.1
+uvicorn==0.54.0
+norminette==3.3.60

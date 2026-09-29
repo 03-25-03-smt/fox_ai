@@ -7,7 +7,6 @@ import respx
 from bot.norminette import NorminetteError, extract_code, run_norminette, safe_filename
 from bot.web import WebError, WebTools, ensure_public_url, html_to_text
 
-
 # ---------------------------------------------------------------- norminette
 
 

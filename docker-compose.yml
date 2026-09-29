@@ -1,3 +1,20 @@
+# Fox AI: бот + LLM + поиск + песочница + речь + картинки.
+#
+# Видеокарты: GPU_MAIN / GPU_AUX в .env — индексы из `nvidia-smi -L`
+# (по умолчанию 0 = P100 под большие модели, 1 = RTX 3070 под речь/картинки).
+# Сервисы speech и imagegen необязательные: закомментируй их и убери
+# SPEECH_URL / IMAGEGEN_URL, если не нужны.
+
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+networks:
+  default: {}
+  # Внутренняя сеть без выхода в интернет — для песочницы
+  sandbox_net:
+    internal: true
+
 services:
   ollama:
     image: ollama/ollama:0.34.4
@@ -9,7 +26,7 @@ services:
       - "127.0.0.1:11434:11434"
     environment:
       - OLLAMA_KEEP_ALIVE=10m
-      - OLLAMA_MAX_LOADED_MODELS=3   # чат-модель + модель эмбеддингов + запасная
+      - OLLAMA_MAX_LOADED_MODELS=3   # чат-модель + эмбеддинги + vision/быстрая
       - OLLAMA_NUM_PARALLEL=2
     deploy:
       resources:
@@ -28,18 +45,84 @@ services:
     environment:
       - SEARXNG_SECRET=${SEARXNG_SECRET:?задай SEARXNG_SECRET в .env}
 
+  sandbox:
+    build: ./services/sandbox
+    restart: unless-stopped
+    <<: *hardening
+    init: true            # подбирает зомби-процессы после форк-бомб
+    read_only: true
+    tmpfs:
+      - /tmp:exec,size=512m
+    networks: [sandbox_net]  # без интернета
+    mem_limit: 2g
+    pids_limit: 256
+    cpus: 4
+
+  speech:
+    build: ./services/speech
+    restart: unless-stopped
+    <<: *hardening
+    volumes:
+      - ./data/models:/models
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE=float16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_AUX:-1}"]
+              capabilities: [gpu]
+
+  imagegen:
+    build: ./services/imagegen
+    restart: unless-stopped
+    <<: *hardening
+    volumes:
+      - ./data/models:/models
+    environment:
+      - IMAGEGEN_MODEL=${IMAGEGEN_MODEL:-stabilityai/sdxl-turbo}
+      - IMAGEGEN_CPU_OFFLOAD=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_AUX:-1}"]
+              capabilities: [gpu]
+
   bot:
     build: .
     restart: unless-stopped
+    <<: *hardening
     env_file: .env
     environment:
       - OLLAMA_URL=http://ollama:11434
       - SEARXNG_URL=http://searxng:8080
+      - SANDBOX_URL=http://sandbox:8000
+      - SPEECH_URL=${SPEECH_URL-http://speech:8000}
+      - IMAGEGEN_URL=${IMAGEGEN_URL-http://imagegen:8000}
       - DB_PATH=/app/data/fox_ai.sqlite3
       - KNOWLEDGE_DIR=/app/knowledge
+      - BACKUP_DIR=/app/backups
+      # В контейнер бота пробрасывается только nvidia-smi (для /status и алерта
+      # о температуре), вычислительные ресурсы GPU бот не использует
+      - NVIDIA_DRIVER_CAPABILITIES=utility
     volumes:
       - ./data/bot:/app/data
       - ./knowledge:/app/knowledge
+      - ${BACKUP_HOST_DIR:-./data/backups}:/app/backups
+    networks: [default, sandbox_net]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [utility]
     depends_on:
       - ollama
       - searxng
+      - sandbox

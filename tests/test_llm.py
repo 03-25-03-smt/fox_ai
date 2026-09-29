@@ -109,3 +109,19 @@ async def test_chat_json_mode(client):
     route = respx.post(f"{BASE}/api/chat").respond(json={"message": {"content": '{"facts": []}'}})
     assert await client.chat("m", [], json_mode=True) == '{"facts": []}'
     assert json.loads(route.calls.last.request.content)["format"] == "json"
+
+
+@respx.mock
+async def test_options_speed_and_ps():
+    client = OllamaClient(BASE, num_ctx=4096)
+    route = respx.post(f"{BASE}/api/chat").respond(content=ndjson(
+        {"message": {"content": "ok"}, "done": True, "eval_count": 50, "eval_duration": 2_000_000_000}
+    ))
+    [c async for c in client.chat_stream("m", [], options={"temperature": 0.2, "top_p": None})]
+    assert json.loads(route.calls.last.request.content)["options"] == {"num_ctx": 4096, "temperature": 0.2}
+    assert client.speeds[-1].tokens_per_sec == 25.0
+
+    respx.get(f"{BASE}/api/ps").respond(json={"models": [{"name": "qwen2.5:7b", "size_vram": 5, "size": 6}]})
+    [loaded] = await client.loaded_models()
+    assert (loaded.name, loaded.size_vram) == ("qwen2.5:7b", 5)
+    await client.close()
