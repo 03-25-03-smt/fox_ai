@@ -137,3 +137,7 @@ class ImageClient(_Client):
     async def generate(self, prompt: str, *, seed: int | None = None) -> bytes:
         resp = await self._request("POST", "/generate", json={"prompt": prompt, "seed": seed})
         return resp.content
+
+    async def unload(self) -> None:
+        """Сразу освободить видеопамять (не ждать таймера простоя)."""
+        await self._request("POST", "/unload")

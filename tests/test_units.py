@@ -275,3 +275,27 @@ async def test_service_clients():
         await speech.transcribe(b"x")
     respx.get("http://sp/health").mock(side_effect=httpx.ConnectError("down"))
     assert not await speech.health()
+
+
+@respx.mock
+async def test_ollama_unload_all():
+    from bot.llm import OllamaClient
+
+    respx.get("http://o/api/ps").respond(json={"models": [{"name": "qwen2.5:7b"}, {"name": "bge-m3"}]})
+    route = respx.post("http://o/api/generate").respond(json={})
+    client = OllamaClient("http://o")
+    assert await client.unload_all() == ["qwen2.5:7b", "bge-m3"]
+    sent = [__import__("json").loads(c.request.content) for c in route.calls]
+    assert sent == [{"model": "qwen2.5:7b", "keep_alive": 0}, {"model": "bge-m3", "keep_alive": 0}]
+    await client.close()
+
+
+def test_imagegen_unload_endpoint():
+    from fastapi.testclient import TestClient
+
+    imagegen = load_service("imagegen")
+    imagegen._pipe = object()
+    with TestClient(imagegen.app) as client:
+        assert client.post("/unload").json() == {"unloaded": True}
+        assert client.post("/unload").json() == {"unloaded": False}
+    assert imagegen._pipe is None

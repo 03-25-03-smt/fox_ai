@@ -29,15 +29,20 @@ class FakeLLM:
         self.supports_tools = True
         self.facts_json = '{"facts": []}'
         self.chat_reply = "резюме диалога"
-        self.models = ["bge-m3:latest", "llama3.1:8b", "qwen2.5-coder:14b", "qwen2.5:3b",
+        self.models = ["bge-m3:latest", "llama3.1:8b", "qwen2.5-coder:7b", "qwen2.5:3b",
                        "qwen2.5:7b", "qwen2.5vl:7b"]
         self.speeds = []
+        self.unloaded: list[str] = []
 
     async def list_models(self, cached: bool = False) -> list[str]:
         return list(self.models)
 
     async def loaded_models(self):
         return [LoadedModel("qwen2.5:7b", 5 * 1024**3, 5 * 1024**3)]
+
+    async def unload_all(self):
+        self.unloaded.append("*")
+        return ["qwen2.5:7b"]
 
     async def chat_stream(self, model, messages, tools=None, options=None):
         self.calls.append({"model": model, "messages": [dict(m) for m in messages],
@@ -136,6 +141,9 @@ class FakeImages:
     async def generate(self, prompt: str, seed=None) -> bytes:
         self.prompts.append(prompt)
         return b"\x89PNG-fake"
+
+    async def unload(self) -> None:
+        self.unloads = getattr(self, "unloads", 0) + 1
 
     async def health(self) -> bool:
         return False

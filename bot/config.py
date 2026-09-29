@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     default_model: str = "qwen2.5:7b"  # универсальная модель
     auto_model: bool = True  # если пользователь не выбрал модель — выбирать по запросу
-    code_model: str = "qwen2.5-coder:14b"  # для кода (автовыбор)
+    code_model: str = "qwen2.5-coder:7b"  # для кода (автовыбор); на P100 — qwen2.5-coder:14b
     fast_model: str = "qwen2.5:3b"  # для коротких реплик, фактов, резюме, перевода
     vision_model: str = "qwen2.5vl:7b"  # для фото
     default_mode: str = "chat"
@@ -67,7 +67,9 @@ class Settings(BaseSettings):
 
     # --- Лимиты ---
     daily_limit: int = 0  # запросов к моделям в день на пользователя (0 = без лимита, админам не действует)
-    max_concurrent: int = 2  # одновременных генераций на GPU, остальные ждут в очереди
+    max_concurrent: int = 1  # одновременных генераций на GPU, остальные ждут в очереди
+    # Одна видеокарта: на время /draw выгружать LLM из VRAM и не пускать другие генерации
+    imagegen_exclusive: bool = True
 
     # --- Мониторинг и бэкапы ---
     gpu_temp_alert: int = 85  # °C, выше — предупреждение админам

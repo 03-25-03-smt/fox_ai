@@ -184,6 +184,22 @@ async def cmd_search(message: Message, command: CommandObject, app: App, turn: T
 # ---------------------------------------------------------------- картинки
 
 
+async def _generate_image(app: App, prompt: str) -> bytes:
+    if not app.settings.imagegen_exclusive:
+        return await app.imagegen.generate(prompt)
+    # Одна видеокарта: LLM и SDXL вместе в 8 ГБ не помещаются. Занимаем очередь GPU
+    # (чаты подождут), выгружаем модели Ollama, рисуем и сразу освобождаем VRAM.
+    async with app.queue.slot():
+        await app.llm.unload_all()
+        try:
+            return await app.imagegen.generate(prompt)
+        finally:
+            try:
+                await app.imagegen.unload()
+            except ServiceError:
+                pass
+
+
 @router.message(Command("draw"))
 async def cmd_draw(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
     prompt = (command.args or "").strip()
@@ -204,8 +220,8 @@ async def cmd_draw(message: Message, command: CommandObject, app: App, turn: Tur
         status = await message.answer("🎨 Рисую… (первый запуск может занять пару минут — грузится модель)")
         english = await app.assistant.translate_to_english(prompt)
         try:
-            png = await app.imagegen.generate(english)
-        except ServiceError as exc:
+            png = await _generate_image(app, english)
+        except (ServiceError, LLMError) as exc:
             await status.edit_text(f"⚠️ {exc}")
             return
         await app.count_usage(turn.user_id)

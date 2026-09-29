@@ -115,6 +115,14 @@ async def health() -> dict[str, object]:
     return {"ok": True, "model": MODEL, "loaded": _pipe is not None}
 
 
+@app.post("/unload")
+async def unload() -> dict[str, bool]:
+    async with _lock:
+        was_loaded = _pipe is not None
+        _unload()
+    return {"unloaded": was_loaded}
+
+
 @app.post("/generate")
 async def generate(req: GenerateRequest) -> Response:
     global _last_used

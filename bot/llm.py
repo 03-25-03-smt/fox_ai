@@ -78,6 +78,16 @@ class OllamaClient:
             for m in data.get("models", [])
         ]
 
+    async def unload(self, model: str) -> None:
+        """Выгрузить модель из видеопамяти (keep_alive=0)."""
+        await self._post("/api/generate", {"model": model, "keep_alive": 0})
+
+    async def unload_all(self) -> list[str]:
+        names = [m.name for m in await self.loaded_models()]
+        for name in names:
+            await self.unload(name)
+        return names
+
     async def chat_stream(
         self,
         model: str,

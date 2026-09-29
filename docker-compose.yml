@@ -1,7 +1,8 @@
 # Fox AI: бот + LLM + поиск + песочница + речь + картинки.
 #
-# Видеокарты: GPU_MAIN / GPU_AUX в .env — индексы из `nvidia-smi -L`
-# (по умолчанию 0 = P100 под большие модели, 1 = RTX 3070 под речь/картинки).
+# Видеокарты: GPU_MAIN / GPU_AUX в .env — индексы из `nvidia-smi -L`.
+# Сейчас профиль «одна RTX 3070»: GPU_MAIN = GPU_AUX = номер 3070, речь на CPU.
+# Потом для P100 + 3070: GPU_MAIN = P100 (LLM), GPU_AUX = 3070 (речь, картинки).
 # Сервисы speech и imagegen необязательные: закомментируй их и убери
 # SPEECH_URL / IMAGEGEN_URL, если не нужны.
 
@@ -26,14 +27,15 @@ services:
       - "127.0.0.1:11434:11434"
     environment:
       - OLLAMA_KEEP_ALIVE=10m
-      - OLLAMA_MAX_LOADED_MODELS=3   # чат-модель + эмбеддинги + vision/быстрая
-      - OLLAMA_NUM_PARALLEL=2
+      # 8 ГБ: чат-модель + эмбеддинги; каждый параллельный запрос съедает VRAM под контекст
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${GPU_MAIN:-0}"]
               capabilities: [gpu]
 
   searxng:
@@ -65,9 +67,10 @@ services:
     volumes:
       - ./data/models:/models
     environment:
-      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
-      - WHISPER_DEVICE=cuda
-      - WHISPER_COMPUTE=float16
+      # По умолчанию на CPU (Ryzen), чтобы не отнимать VRAM у LLM на одной 3070
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE=${WHISPER_COMPUTE:-int8}
     deploy:
       resources:
         reservations:
@@ -85,6 +88,7 @@ services:
     environment:
       - IMAGEGEN_MODEL=${IMAGEGEN_MODEL:-stabilityai/sdxl-turbo}
       - IMAGEGEN_CPU_OFFLOAD=1
+      - IDLE_UNLOAD_SECONDS=120
     deploy:
       resources:
         reservations:

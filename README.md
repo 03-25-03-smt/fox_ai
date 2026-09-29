@@ -21,6 +21,10 @@ sudo apt install -y git curl openssl
 
 Ветка **580** — последняя, которая поддерживает Tesla P100 (Pascal), и подходит для RTX 3070.
 
+> Сейчас бот настроен на **одну RTX 3070** (`.env.example`). Пока нет охлаждения для P100 —
+> лучше вынуть её из компьютера: даже без нагрузки пассивная карта в корпусе греется.
+> Значения для P100 + 3070 подписаны в `.env.example` комментариями `P100:`.
+
 ```bash
 sudo apt install -y nvidia-driver-580
 sudo reboot
@@ -30,7 +34,7 @@ sudo reboot
 
 ```bash
 nvidia-smi
-nvidia-smi -L   # запомни номер RTX 3070 — это GPU_AUX в .env
+nvidia-smi -L   # номер RTX 3070 → GPU_MAIN и GPU_AUX в .env
 ```
 
 > ⚠️ У P100 нет своего вентилятора. Без направленного обдува она перегреется за минуты.
@@ -102,7 +106,7 @@ nano .env
 | `SEARXNG_SECRET` | строка из `openssl rand -hex 32` |
 | `OLLAMA_MODELS_DIR` | `/mnt/hdd/ollama` |
 | `BACKUP_HOST_DIR` | `/mnt/hdd/fox_ai_backups` |
-| `GPU_AUX` | номер RTX 3070 из `nvidia-smi -L` (речь и картинки) |
+| `GPU_MAIN`, `GPU_AUX` | номер RTX 3070 из `nvidia-smi -L` |
 | `INTRA_CLIENT_ID/SECRET` | необязательно: [приложение в интре](https://profile.intra.42.fr/oauth/applications) для `/42` |
 
 ```bash
@@ -125,7 +129,7 @@ docker compose logs -f bot       # ждём «Fox AI (@имя_бота) запу
 ```bash
 docker compose exec ollama ollama pull bge-m3              # эмбеддинги: память и база знаний (обязательно)
 docker compose exec ollama ollama pull qwen2.5:7b          # основная модель
-docker compose exec ollama ollama pull qwen2.5-coder:14b   # для кода
+docker compose exec ollama ollama pull qwen2.5-coder:7b    # для кода (на P100 — :14b)
 docker compose exec ollama ollama pull qwen2.5:3b          # быстрая: короткие ответы, факты, резюме
 docker compose exec ollama ollama pull qwen2.5vl:7b        # для фото
 ```
@@ -172,8 +176,8 @@ docker compose down
 | `ollama` | LLM-модели на GPU |
 | `searxng` | поиск в интернете (без внешних API) |
 | `sandbox` | компиляция и запуск C-кода: `/run`, `/valgrind`, `/asan`, `/tests`, проверка проектов (без интернета) |
-| `speech` | голосовые сообщения (Whisper) и ответы голосом (Piper) |
-| `imagegen` | `/draw` — картинки (SDXL-Turbo) |
+| `speech` | голосовые сообщения (Whisper) и ответы голосом (Piper), сейчас на CPU |
+| `imagegen` | `/draw` — картинки (SDXL-Turbo); на одной 3070 на время рисования LLM выгружается |
 | `bot` | сам Telegram-бот |
 
 В папку `knowledge/` можно положить PDF Norm и subjects — бот будет на них опираться

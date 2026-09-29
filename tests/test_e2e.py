@@ -94,7 +94,7 @@ async def test_modes_switch_prompt_and_knowledge(env):
     prompt = env.system_prompt()
     assert "наставник школы 42" in prompt
     assert "[norm.md]" in prompt and "25 строк" in prompt
-    assert env.llm.calls[-1]["model"] == "qwen2.5-coder:14b"  # режим 42 -> coder-модель
+    assert env.llm.calls[-1]["model"] == "qwen2.5-coder:7b"  # режим 42 -> coder-модель
 
 
 async def test_memory_commands_and_injection(env):
