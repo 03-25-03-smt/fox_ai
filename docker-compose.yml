@@ -1,0 +1,45 @@
+services:
+  ollama:
+    image: ollama/ollama:0.34.4
+    restart: unless-stopped
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-./data/ollama}:/root/.ollama
+    # Только localhost: снаружи API Ollama недоступен (у него нет авторизации)
+    ports:
+      - "127.0.0.1:11434:11434"
+    environment:
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_MAX_LOADED_MODELS=3   # чат-модель + модель эмбеддингов + запасная
+      - OLLAMA_NUM_PARALLEL=2
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  searxng:
+    image: searxng/searxng:2026.9.29-f5035873a
+    restart: unless-stopped
+    # Порт наружу не публикуем — поиском пользуется только бот
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?задай SEARXNG_SECRET в .env}
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - SEARXNG_URL=http://searxng:8080
+      - DB_PATH=/app/data/fox_ai.sqlite3
+      - KNOWLEDGE_DIR=/app/knowledge
+    volumes:
+      - ./data/bot:/app/data
+      - ./knowledge:/app/knowledge
+    depends_on:
+      - ollama
+      - searxng

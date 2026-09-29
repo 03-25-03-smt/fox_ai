@@ -1,0 +1,18 @@
+# Минимальный конфиг SearXNG для бота: включён JSON API, лимитер выключен
+# (SearXNG доступен только внутри docker-сети).
+use_default_settings: true
+
+general:
+  instance_name: "fox_ai search"
+
+server:
+  # Реальный ключ берётся из переменной окружения SEARXNG_SECRET
+  secret_key: "overridden-by-env"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
