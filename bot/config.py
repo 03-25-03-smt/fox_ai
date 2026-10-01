@@ -94,6 +94,17 @@ class Settings(BaseSettings):
     gpu_temp_alert: int = 85  # °C, выше — предупреждение админам
     # Снимок nvidia-smi, который пишет хост (windows/gpu-stats.ps1); пусто = звать nvidia-smi
     gpu_stats_file: str = ""
+    # Папка обмена с агентом на Windows (windows/fox-agent.ps1); пусто = /logs, /restart, /power выключены
+    host_dir: str = ""
+    # Бережный режим P100: карта для LLM (часть имени), перегрев/остывание (°C), лимит мощности при перегреве
+    llm_gpu_name: str = "P100"
+    gpu_throttle_temp: int = 80
+    gpu_cool_temp: int = 72
+    gpu_throttle_power: int = 150  # Вт; P100 по умолчанию 250
+    # Ночью выгружать модели из VRAM после простоя (часы местного времени, минуты простоя); -1 = выключено
+    night_unload_from: int = 1
+    night_unload_to: int = 7
+    night_unload_idle: int = 20
     backup_dir: str = ""  # пусто = бэкапы выключены
     backup_keep: int = 14
     backup_hour: int = 4

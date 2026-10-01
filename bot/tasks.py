@@ -15,9 +15,11 @@ from .app import App
 from .aquarium_bot import tick as aquarium_tick
 from .handlers.briefing import send_briefings
 from .backup import backup_database
-from .gpu import query_gpus
+from .gpu import GpuInfo, query_gpus
+from .host import HostError
 from .intra import IntraError
 from .lang import LANGS
+from .llm import LLMError
 
 log = logging.getLogger(__name__)
 
@@ -69,10 +71,70 @@ async def deliver_reminders(bot: Bot, app: App, now: datetime.datetime | None = 
 # ---------------------------------------------------------------- GPU
 
 
+def llm_gpu(app: App, gpus: list[GpuInfo]) -> GpuInfo | None:
+    name = app.settings.llm_gpu_name.lower()
+    return next((g for g in gpus if name and name in g.name.lower()), None)
+
+
+async def gentle_mode(bot: Bot, app: App, gpus: list[GpuInfo]) -> str | None:
+    """Перегрев LLM-карты: одна генерация за раз и лимит мощности через агент.
+    Остыла — всё обратно. Возвращает "on"/"off", если режим переключился."""
+    s, gpu = app.settings, llm_gpu(app, gpus)
+    if gpu is None or gpu.temperature is None:
+        return None
+    if not app.throttled and gpu.temperature >= s.gpu_throttle_temp:
+        app.throttled = True
+        await app.queue.set_limit(1)
+        power = await _power(app, str(s.gpu_throttle_power))
+        await notify_admins(bot, app, f"🌡 <b>{html.escape(gpu.name)}: {gpu.temperature}°C</b> — бережный режим: "
+                            f"одна генерация за раз{power}. Вернусь к норме ниже {s.gpu_cool_temp}°C.")
+        return "on"
+    if app.throttled and gpu.temperature <= s.gpu_cool_temp:
+        app.throttled = False
+        await app.queue.set_limit(app.queue.slots)
+        power = await _power(app, "default")
+        await notify_admins(bot, app, f"✅ {html.escape(gpu.name)} остыла до {gpu.temperature}°C — обычный режим{power}.")
+        return "off"
+    return None
+
+
+async def _power(app: App, value: str) -> str:
+    if app.host is None:
+        return ""
+    try:
+        result = await app.host.run("power", value, timeout=30)
+    except HostError as exc:
+        log.warning("power limit %s failed: %s", value, exc)
+        return ""
+    return f", {result.output.strip()}" if result.ok else ""
+
+
+async def night_unload(app: App, now: datetime.datetime | None = None) -> bool:
+    """Ночью выгружает модели из VRAM после простоя: карта остывает и меньше ест."""
+    s = app.settings
+    if s.night_unload_from < 0:
+        return False
+    local = now or datetime.datetime.now(app.assistant.tz(None))
+    start, end = s.night_unload_from, s.night_unload_to
+    night = start <= local.hour < end if start <= end else (local.hour >= start or local.hour < end)
+    idle = time.monotonic() - app.queue.last_used >= s.night_unload_idle * 60
+    if not night or not idle or app.queue.active:
+        return False
+    try:
+        unloaded = await app.llm.unload_all()
+    except LLMError as exc:
+        log.warning("night unload failed: %s", exc)
+        return False
+    if unloaded:
+        log.info("night: unloaded %s", ", ".join(unloaded))
+    return bool(unloaded)
+
+
 async def check_gpu_temperature(bot: Bot, app: App) -> bool:
     gpus = await query_gpus(app.settings.gpu_stats_file)
     if not gpus:
         return False
+    await gentle_mode(bot, app, gpus)
     limit = app.settings.gpu_temp_alert
     hot = [g for g in gpus if g.temperature is not None and g.temperature >= limit]
     if not hot or time.monotonic() - app.last_gpu_alert < GPU_ALERT_COOLDOWN:
@@ -177,6 +239,7 @@ def start_background(bot: Bot, app: App) -> None:
 
     async def gpu_step() -> None:
         await check_gpu_temperature(bot, app)
+        await night_unload(app)
 
     async def schedule_step() -> None:
         local = datetime.datetime.now(app.assistant.tz(None))

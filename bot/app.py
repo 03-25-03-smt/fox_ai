@@ -16,31 +16,42 @@ from .services import ImageClient, SandboxClient, SpeechClient
 
 
 class GpuQueue:
-    """Ограничивает число одновременных генераций; считает, сколько ждут."""
+    """Ограничивает число одновременных генераций; считает, сколько ждут.
+    Лимит можно менять на лету (бережный режим при перегреве GPU)."""
 
     def __init__(self, slots: int) -> None:
-        self._sem = asyncio.Semaphore(max(slots, 1))
-        self.slots = max(slots, 1)
+        self.slots = max(slots, 1)  # лимит из настроек
+        self.limit = self.slots  # текущий лимит
         self.waiting = 0
         self.active = 0
+        self.last_used = time.monotonic()
+        self._cond = asyncio.Condition()
 
     @property
     def busy(self) -> bool:
-        return self.active >= self.slots
+        return self.active >= self.limit
+
+    async def set_limit(self, limit: int) -> None:
+        async with self._cond:
+            self.limit = max(1, min(limit, self.slots))
+            self._cond.notify_all()
 
     @asynccontextmanager
     async def slot(self):
-        self.waiting += 1
-        try:
-            await self._sem.acquire()
-        finally:
-            self.waiting -= 1
-        self.active += 1
+        async with self._cond:
+            self.waiting += 1
+            try:
+                await self._cond.wait_for(lambda: self.active < self.limit)
+            finally:
+                self.waiting -= 1
+            self.active += 1
         try:
             yield
         finally:
-            self.active -= 1
-            self._sem.release()
+            async with self._cond:
+                self.active -= 1
+                self.last_used = time.monotonic()
+                self._cond.notify_all()
 
 
 @dataclass
@@ -61,6 +72,8 @@ class App:
     bot_username: str = ""
     background: set[asyncio.Task] = field(default_factory=set)
     last_gpu_alert: float = 0.0
+    host: object | None = None  # host.HostAgent: команды агенту на Windows
+    throttled: bool = False  # бережный режим из-за перегрева включён
 
     @property
     def llm(self):

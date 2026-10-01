@@ -11,6 +11,7 @@ from .config import Settings
 from .db import Database
 from .docs import PersonalDocs
 from .handlers import BOT_COMMANDS, build_router
+from .host import HostAgent
 from .intra import IntraClient
 from .knowledge import KnowledgeBase
 from .llm import OllamaClient
@@ -49,6 +50,7 @@ def build_app(settings: Settings, db: Database) -> App:
         imagegen=ImageClient(settings.imagegen_url) if settings.imagegen_url else None,
         intra=intra,
         queue=GpuQueue(settings.max_concurrent),
+        host=HostAgent(settings.host_dir) if settings.host_dir else None,
     )
 
 

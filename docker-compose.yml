@@ -109,10 +109,13 @@ services:
       - BACKUP_DIR=/app/backups
       # Температуры всех трёх карт пишет на хосте windows/gpu-stats.ps1
       - GPU_STATS_FILE=/app/gpu/gpu.csv
+      # Обмен с агентом Windows (windows/fox-agent.ps1): /logs, /restart, /power
+      - HOST_DIR=/app/host
     volumes:
       - bot_data:/app/data
       - ./knowledge:/app/knowledge
       - ./data/gpu:/app/gpu:ro
+      - ./data/host:/app/host
       - ${BACKUP_HOST_DIR:-./data/backups}:/app/backups
     networks: [default, sandbox_net]
     depends_on:
