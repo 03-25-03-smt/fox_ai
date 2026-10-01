@@ -5,7 +5,7 @@ from aiogram.types import BotCommand, Message
 
 from ..access import AccessMiddleware
 from ..app import App
-from . import admin, chat, code42, files, lang, settings, tools
+from . import admin, aquarium, chat, code42, files, lang, settings, tools
 
 BOT_COMMANDS = [
     BotCommand(command="mode", description="Режим: общение / 42 / защита"),
@@ -22,6 +22,7 @@ BOT_COMMANDS = [
     BotCommand(command="w", description="Слово: перевод и в словарь (de/cs)"),
     BotCommand(command="quiz", description="Повторить слова из словаря"),
     BotCommand(command="lang", description="Учитель языков: уроки, тесты, словарь"),
+    BotCommand(command="aq", description="Аквариум: задачи, статистика, советы"),
     BotCommand(command="search", description="Найти в интернете"),
     BotCommand(command="draw", description="Нарисовать картинку"),
     BotCommand(command="remind", description="Напоминание"),
@@ -48,8 +49,9 @@ def build_router(app: App) -> Router:
     root.message.outer_middleware(access)
     root.callback_query.outer_middleware(access)
 
-    # lang — раньше chat: он перехватывает голосовые и текст, когда ждёт ответа ученика
-    for module in (settings, admin, tools, code42, lang, files, chat):
+    # aquarium и lang — раньше files и chat: они перехватывают текст, голосовые и файлы,
+    # когда ждут ответа (причина «не могу», ответ на вопрос, предложение со словом)
+    for module in (settings, admin, tools, code42, aquarium, lang, files, chat):
         root.include_router(module.router.build())
     fallback = Router(name="fallback")
     fallback.message.register(chat.on_text, F.text & ~F.text.startswith("/"))

@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     lang_daily_min: int = 5  # и случайное число слов
     lang_daily_max: int = 15
 
+    # --- Аквариум (бывший fish_helper) ---
+    aquarium_caretaker_ids: str = ""  # кто ухаживает (получает задачи); пусто = модуль выключен
+    aquarium_owner_id: str = ""  # кому отчёты и тревоги; пусто = первый из ADMIN_IDS
+    aquarium_owner_name: str = "владельцу"  # «Я передал …»
+    aquarium_timezone: str = ""  # пусто = TIMEZONE
+    aquarium_ask_ids: str = ""  # кому агент задаёт вопросы об аквариуме; пусто = владельцу
+    aquarium_ask_hour: int = 18  # во сколько (местное время) задавать вопрос дня
+
     # --- Мониторинг и бэкапы ---
     gpu_temp_alert: int = 85  # °C, выше — предупреждение админам
     # Снимок nvidia-smi, который пишет хост (windows/gpu-stats.ps1); пусто = звать nvidia-smi
@@ -98,6 +106,29 @@ class Settings(BaseSettings):
     @property
     def tutor_model(self) -> str:
         return self.lang_model or self.default_model
+
+    @property
+    def aquarium_caretakers(self) -> frozenset[int]:
+        return parse_ids(self.aquarium_caretaker_ids)
+
+    @property
+    def aquarium_enabled(self) -> bool:
+        return bool(self.aquarium_caretakers)
+
+    @property
+    def aquarium_owner(self) -> int:
+        return min(parse_ids(self.aquarium_owner_id) or self.admins, default=0)
+
+    @property
+    def aquarium_members(self) -> frozenset[int]:
+        """Кому доступен аквариум: ухаживающие и владелец."""
+        if not self.aquarium_enabled:
+            return frozenset()
+        return self.aquarium_caretakers | {self.aquarium_owner} - {0}
+
+    @property
+    def aquarium_askees(self) -> frozenset[int]:
+        return parse_ids(self.aquarium_ask_ids) or frozenset({self.aquarium_owner}) - {0}
 
     @property
     def web_enabled(self) -> bool:

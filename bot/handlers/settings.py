@@ -15,8 +15,10 @@ from aiogram.types import (
 
 from ..app import App
 from ..assistant import Turn
+from ..aquarium_bot import main_menu
 from ..llm import LLMError
 from ..modes import LENGTHS, MODES, PERSONA_PRESETS, TEMPERATURES, get_mode
+from .aquarium import help_text as aquarium_help
 from .common import need_registered
 from .registry import Routes
 
@@ -60,6 +62,10 @@ LANG_HELP = (
     "/lesson · /test · /talk — урок, тест, разговор · /speak — произношение\n"
     "/lang — уровень, статистика, ежедневное повторение"
 )
+AQUARIUM_HELP = (
+    "\n\n<b>Аквариум 🐠</b>\n"
+    "/aq — меню: задачи, история, статистика · /tank — что я знаю · /water — тесты воды"
+)
 ADMIN_HELP = (
     "\n\n<b>Админ</b>\n"
     "/adduser &lt;id&gt; [имя] · /deluser &lt;id&gt; · /users\n"
@@ -73,8 +79,16 @@ ADMIN_HELP = (
 @router.message(CommandStart())
 @router.message(Command("help"))
 async def cmd_start(message: Message, app: App, turn: Turn, is_admin: bool) -> None:
-    lang = LANG_HELP if turn.registered and turn.user_id in app.settings.lang_users else ""
-    await message.answer(HELP_TEXT + lang + (ADMIN_HELP if is_admin else ""), parse_mode=ParseMode.HTML)
+    s = app.settings
+    if turn.user_id in s.aquarium_caretakers and not is_admin:
+        # Тому, кто ухаживает за аквариумом, — сразу его меню, без 42 и прочего
+        await message.answer("🐟 Привет! Я слежу за уходом за аквариумом.\n\n" + aquarium_help(app, turn.user_id),
+                             parse_mode=ParseMode.HTML, reply_markup=main_menu(owner=False))
+        return
+    lang = LANG_HELP if turn.registered and turn.user_id in s.lang_users else ""
+    aquarium = AQUARIUM_HELP if turn.user_id in s.aquarium_members else ""
+    await message.answer(HELP_TEXT + lang + aquarium + (ADMIN_HELP if is_admin else ""),
+                         parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("whoami"))
@@ -115,8 +129,13 @@ async def cmd_reset(message: Message, app: App, turn: Turn) -> None:
 
 
 def _mode_allowed(app: App, turn: Turn, key: str) -> bool:
-    """Закрытые режимы (учитель языков) — только тем, кому они разрешены."""
-    return not MODES[key].private or turn.user_id in app.settings.lang_users
+    """Закрытые режимы (учитель языков, аквариум) — только тем, кому они разрешены."""
+    audience = MODES[key].audience
+    if audience == "lang":
+        return turn.user_id in app.settings.lang_users
+    if audience == "aquarium":
+        return turn.user_id in app.settings.aquarium_members
+    return True
 
 
 @router.message(Command("mode"))
@@ -148,6 +167,7 @@ async def on_mode_chosen(callback: CallbackQuery, app: App, turn: Turn) -> None:
     hint = {
         "defense": "\nПришли код или проект и нажми /defense, чтобы начать.",
         "lang": "\nПиши на немецком или чешском — поправлю ошибки. Команды: /lang",
+        "aquarium": "\nСпрашивай про аквариум или пришли фото. Меню: /aq",
     }.get(key, "")
     if isinstance(callback.message, Message):
         await callback.message.edit_text(f"✅ Режим: {MODES[key].title}{hint}")

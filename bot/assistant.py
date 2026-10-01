@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .aquarium import Aquarium
+from .aquarium_brain import AquariumBrain
 from .config import Settings
 from .db import Database, User
 from .docs import PersonalDocs
@@ -131,13 +133,19 @@ class Assistant:
         self.web = web
         self.docs = docs or PersonalDocs(db, llm, settings.embed_model)
         self.lang = LangStore(db)
+        self.aquarium = Aquarium(db, self._zone(settings.aquarium_timezone or settings.timezone))
+        self.aquarium_brain = AquariumBrain(db)
         self._no_tools: set[str] = set()  # модели, которые не умеют tool calling
         self._summary_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     # ------------------------------------------------------------ настройки запроса
 
     def tz(self, user: User | None) -> zoneinfo.ZoneInfo:
-        for name in ((user.tz if user else None), self.settings.timezone, "UTC"):
+        return self._zone(user.tz if user else None, self.settings.timezone)
+
+    @staticmethod
+    def _zone(*names: str | None) -> zoneinfo.ZoneInfo:
+        for name in (*names, "UTC"):
             if name:
                 try:
                     return zoneinfo.ZoneInfo(name)
@@ -227,6 +235,10 @@ class Assistant:
 
         if mode.key == "lang" and turn.registered:
             parts.append(await self.lang.context_for(turn.user_id))
+
+        if mode.key == "aquarium":
+            today = self.aquarium.now().date()
+            parts.append(await self.aquarium_brain.context(await self.aquarium.care_summary(today)))
 
         if mode.key == "defense":
             state = await self.db.get_state(turn.chat_id)
@@ -370,6 +382,10 @@ class Assistant:
     async def after_reply(self, turn: Turn, user_text: str, *, extract_memory: bool = True) -> None:
         if extract_memory and turn.registered and self.settings.memory_auto:
             await self.memory.extract_and_store(turn.user_id, user_text, self.settings.helper_model)
+        if (extract_memory and self.mode_for(turn).key == "aquarium"
+                and turn.user_id in self.settings.aquarium_members):
+            # Аквариумист запоминает из разговора то, что узнал об аквариуме
+            await self.aquarium_brain.learn(self.llm, self.settings.default_model, user_text, source="chat")
         await self.summarize_if_needed(turn.chat_id)
 
     async def translate_to_english(self, text: str) -> str:

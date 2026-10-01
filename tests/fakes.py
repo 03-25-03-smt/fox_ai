@@ -29,6 +29,8 @@ class FakeLLM:
         self.supports_tools = True
         self.facts_json = '{"facts": []}'
         self.chat_reply = "резюме диалога"
+        # Ответы chat() по порядку, пока не кончатся: (подстрока промпта или "", ответ)
+        self.scripted: list[tuple[str, str]] = []
         self.models = ["bge-m3:latest", "llama3.1:8b", "qwen2.5-coder:7b", "qwen2.5:3b",
                        "qwen2.5:7b", "qwen2.5vl:7b"]
         self.speeds = []
@@ -57,6 +59,10 @@ class FakeLLM:
 
     async def chat(self, model, messages, json_mode=False, options=None):
         self.chat_calls.append({"model": model, "messages": messages, "json": json_mode})
+        prompt = messages[-1]["content"]
+        for i, (needle, reply) in enumerate(self.scripted):
+            if needle in prompt:
+                return self.scripted.pop(i)[1]
         return self.facts_json if json_mode else self.chat_reply
 
     async def embed(self, model, texts):

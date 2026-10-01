@@ -162,6 +162,55 @@ CREATE TABLE IF NOT EXISTS lang_log (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Аквариум: задачи ухода (одна запись на задачу в день). Время — ISO с часовым поясом,
+-- как в старом fish_helper, чтобы его базу можно было импортировать как есть.
+CREATE TABLE IF NOT EXISTS aq_tasks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    date              TEXT NOT NULL,
+    task_id           TEXT NOT NULL,
+    task_name         TEXT NOT NULL,
+    sent_at           TEXT NOT NULL,
+    remind_at         TEXT,
+    overdue_at        TEXT,
+    reminded          INTEGER NOT NULL DEFAULT 0,
+    overdue_notified  INTEGER NOT NULL DEFAULT 0,
+    snooze_count      INTEGER NOT NULL DEFAULT 0,
+    completed_at      TEXT,
+    completed_by      INTEGER,
+    completed_by_name TEXT,
+    cant_at           TEXT,
+    cant_reason       TEXT,
+    cant_by_name      TEXT,
+    UNIQUE (date, task_id)
+);
+CREATE TABLE IF NOT EXISTS aq_settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS aq_schedule (task_id TEXT PRIMARY KEY, time TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS aq_achievements (streak INTEGER PRIMARY KEY, achieved_at TEXT NOT NULL);
+
+-- Что агент знает об аквариуме: накапливается из ответов на его вопросы и разговоров
+CREATE TABLE IF NOT EXISTS aq_facts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS aq_questions (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id  INTEGER NOT NULL,
+    topic    TEXT NOT NULL,
+    question TEXT NOT NULL,
+    tg_msg_id INTEGER,
+    answered INTEGER NOT NULL DEFAULT 0,  -- 1 ответил, -1 «не знаю» / пропустил
+    asked_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS aq_water (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    at    TEXT NOT NULL DEFAULT (datetime('now')),
+    param TEXT NOT NULL,
+    value REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS allowed_chats (
     chat_id  INTEGER PRIMARY KEY,
     title    TEXT NOT NULL DEFAULT '',

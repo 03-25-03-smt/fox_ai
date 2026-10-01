@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .app import App
+from .aquarium_bot import tick as aquarium_tick
 from .backup import backup_database
 from .gpu import query_gpus
 from .intra import IntraError
@@ -25,6 +26,7 @@ GPU_ALERT_COOLDOWN = 30 * 60
 SCHEDULE_INTERVAL = 300
 BLACKHOLE_WARN_DAYS = (30, 14, 7, 3, 2, 1, 0)
 LANG_INTERVAL = 60
+AQUARIUM_INTERVAL = 30
 LANG_LATEST_HOUR = 21  # если бот был выключен в назначенное время — позже 21:00 не будим
 
 
@@ -193,3 +195,9 @@ def start_background(bot: Bot, app: App) -> None:
 
     app.spawn(_loop("schedule", SCHEDULE_INTERVAL, schedule_step))
     app.spawn(_loop("lang", LANG_INTERVAL, lang_step))
+
+    if s.aquarium_enabled:
+        async def aquarium_step() -> None:
+            await aquarium_tick(bot, app)
+
+        app.spawn(_loop("aquarium", AQUARIUM_INTERVAL, aquarium_step))

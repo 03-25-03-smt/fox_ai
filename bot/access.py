@@ -73,6 +73,10 @@ class AccessMiddleware(BaseMiddleware):
         if is_admin:
             # Админ должен быть в таблице users, чтобы хранить его настройки и память.
             await db.add_user(tg_user.id, tg_user.full_name)
+        elif tg_user.id in app.settings.aquarium_caretakers:
+            # Тот, кто ухаживает за аквариумом, получает доступ сам; по умолчанию — режим аквариумиста
+            if await db.add_user(tg_user.id, tg_user.full_name):
+                await db.set_mode(tg_user.id, "aquarium")
         user = await db.get_user(tg_user.id)
 
         if user is None and not (group and await db.is_chat_allowed(chat.id)):
