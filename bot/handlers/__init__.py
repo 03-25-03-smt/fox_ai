@@ -21,6 +21,7 @@ BOT_COMMANDS = [
     BotCommand(command="42", description="Мой профиль в интре"),
     BotCommand(command="w", description="Слово: перевод и в словарь (de/cs)"),
     BotCommand(command="quiz", description="Повторить слова из словаря"),
+    BotCommand(command="read", description="Текст для чтения на немецком / чешском"),
     BotCommand(command="lang", description="Учитель языков: уроки, тесты, словарь"),
     BotCommand(command="aq", description="Аквариум: задачи, статистика, советы"),
     BotCommand(command="morning", description="Утренняя сводка: погода, дела, новости"),

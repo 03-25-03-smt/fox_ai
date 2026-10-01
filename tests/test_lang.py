@@ -332,3 +332,67 @@ async def test_speech_client_sends_language():
         await client.close()
     assert stt.calls.last.request.url.params["language"] == "de"
     assert json.loads(tts.calls.last.request.content) == {"text": "Ahoj", "lang": "cs"}
+
+
+# ---------------------------------------------------------------- темы и тексты для чтения
+
+
+def test_parse_topic():
+    from bot.lang import parse_topic
+
+    assert parse_topic("Еда") == "еда" and parse_topic("#дом") == "дом"
+    assert parse_topic("учеба") == "учёба" and parse_topic("путеш") == "путешествия"
+    assert parse_topic("Hund") is None and parse_topic("H") is None
+
+
+async def test_topics_in_dictionary_and_quiz(env):
+    store = env.assistant.lang
+    await env.db.add_user(ADMIN)
+    env.llm.facts_json = json.dumps({**HUND, "topic": "животные"})
+    await env.send(ADMIN, "/w Hund")
+    assert "🐾 животные" in last_text(env)
+    for w, t, topic in (("der Apfel", "яблоко", "еда"), ("das Brot", "хлеб", "еда"), ("das Haus", "дом", "дом")):
+        await store.add_word(ADMIN, entry(w, t, topic=topic), "2026-01-01")
+    await store.add_word(ADMIN, entry("komisch", "странный"), "2026-01-01")  # без темы -> другое
+    await env.send(ADMIN, "/topics")
+    text = last_text(env)
+    assert "🍎 еда: 2" in text and "🏠 дом: 1" in text and "📦 другое: 1" in text
+    await env.send(ADMIN, "/dict de еда")
+    assert "Apfel" in last_text(env) and "Haus" not in last_text(env)
+    await env.send(ADMIN, "/quiz de еда 5")
+    assert {w.word for w in store.quizzes[ADMIN].words} == {"der Apfel", "das Brot"}
+    await env.click(ADMIN, "lq:stop")
+    await env.send(ADMIN, "/quiz de другое")
+    assert [w.word for w in store.quizzes[ADMIN].words] == ["komisch"]
+    word = await store.find_word(ADMIN, "de", "komisch")
+    await env.send(ADMIN, f"/wtopic {word.id} чувства")
+    assert (await store.get_word(ADMIN, word.id)).topic == "чувства"
+
+
+READING = {
+    "title": "Im Supermarkt", "text": "Anna geht in den Supermarkt. Sie kauft Brot und eine Gurke. Die Gurke ist grün.",
+    "ru": "Анна идёт в супермаркет.", "new_words": [{"word": "die Gurke", "translation": "огурец", "pos": "сущ."}],
+    "questions": ["Was kauft Anna?"],
+}
+
+
+async def test_reading_text(env):
+    store = env.assistant.lang
+    await env.db.add_user(ADMIN)
+    await store.add_word(ADMIN, entry("das Brot", "хлеб", topic="еда"), "2026-01-01")
+    env.llm.facts_json = json.dumps(READING)
+    await env.send(ADMIN, "/read de еда")
+    text = last_text(env)
+    assert "Im Supermarkt" in text and "die Gurke — огурец" in text and "Was kauft Anna?" in text
+    prompt = env.llm.chat_calls[-1]["messages"][-1]["content"]
+    assert "A2" in prompt and "«еда»" in prompt and "das Brot" in prompt
+    assert (await env.db.get_user(ADMIN)).mode == "lang"
+    await env.click(ADMIN, "lr:ru")
+    assert "Анна идёт" in last_text(env)
+    await env.click(ADMIN, "lr:add")
+    gurke = await store.find_word(ADMIN, "de", "Gurke")
+    assert gurke.topic == "еда" and "Gurke" in gurke.examples[0]["text"]
+    await env.click(ADMIN, "lr:add")
+    assert "уже в словаре" in last_text(env)
+    await env.send(ADMIN, "Anna kauft Brot.")  # ответ на вопрос — текст есть в истории
+    assert any("Im Supermarkt" in m["content"] for m in env.llm.calls[-1]["messages"])

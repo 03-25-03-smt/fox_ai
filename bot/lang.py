@@ -39,6 +39,25 @@ LANG_ALIASES = {
 }
 LEVELS = ("A1", "A2", "B1", "B2", "C1")
 
+# Темы словаря: модель относит каждое слово к одной из них
+TOPICS = {
+    "еда": "🍎", "дом": "🏠", "работа": "💼", "учёба": "🎓", "город": "🏙", "транспорт": "🚆",
+    "путешествия": "✈️", "покупки": "🛍", "природа": "🌿", "животные": "🐾", "здоровье": "🩺",
+    "люди": "👪", "чувства": "💭", "время": "⏰", "спорт": "⚽", "техника": "💻", "другое": "📦",
+}
+
+
+def parse_topic(text: str) -> str | None:
+    """«еда», «Еда», «#еда», «уч» -> тема; None — не тема."""
+    t = text.strip().lstrip("#").casefold().replace("ё", "е")
+    if len(t) < 2:
+        return None
+    for topic in TOPICS:
+        if topic.replace("ё", "е").startswith(t):
+            return topic
+    return None
+
+
 # Через сколько дней повторять слово из коробки N (0 — новое слово)
 INTERVALS = (1, 1, 3, 7, 21, 60)
 MAX_BOX = len(INTERVALS) - 1
@@ -134,6 +153,12 @@ class Word:
     due: str
     correct: int
     wrong: int
+    topic: str = ""
+
+    @property
+    def topic_label(self) -> str:
+        topic = self.topic if self.topic in TOPICS else "другое"
+        return f"{TOPICS[topic]} {topic}"
 
     @property
     def article(self) -> str | None:
@@ -144,7 +169,7 @@ class Word:
         return first if first in GERMAN_ARTICLES and " " in self.word else None
 
 
-_WORD_COLS = "id, lang, word, translation, pos, grammar, examples, tip, box, due, correct, wrong"
+_WORD_COLS = "id, lang, word, translation, pos, grammar, examples, tip, box, due, correct, wrong, topic"
 
 
 def _word(row: Any) -> Word:
@@ -208,6 +233,7 @@ class LangStore:
         self.rng = rng or random.Random()
         self.pending: dict[int, Pending] = {}
         self.quizzes: dict[int, QuizSession] = {}
+        self.readings: dict[int, "Reading"] = {}  # последний текст для чтения
 
     # ------------------------------------------------------------ уровень и язык
 
@@ -262,10 +288,10 @@ class LangStore:
         examples = json.dumps(entry.get("examples") or [], ensure_ascii=False)
         cur = await self.db._exec(
             "INSERT INTO vocab (user_id, lang, word, lemma, sort_key, translation, pos, grammar, "
-            "examples, tip, due) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "examples, tip, due, topic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, lang, word, lemma, sort_key(lang, word), entry["translation"],
              entry.get("pos", ""), entry.get("grammar", ""), examples, entry.get("tip", ""),
-             _add_days(today, INTERVALS[0])),
+             _add_days(today, INTERVALS[0]), entry.get("topic") if entry.get("topic") in TOPICS else "другое"),
         )
         return await self.get_word(user_id, int(cur.lastrowid)), True
 
@@ -286,6 +312,20 @@ class LangStore:
         cur = await self.db._exec("DELETE FROM vocab WHERE user_id = ? AND id = ?", (user_id, word_id))
         return cur.rowcount > 0
 
+    async def set_topic(self, user_id: int, word_id: int, topic: str) -> bool:
+        cur = await self.db._exec("UPDATE vocab SET topic = ? WHERE user_id = ? AND id = ?", (topic, user_id, word_id))
+        return cur.rowcount > 0
+
+    async def topic_counts(self, user_id: int, lang: str) -> dict[str, int]:
+        rows = await self.db._fetchall(
+            "SELECT topic, COUNT(*) FROM vocab WHERE user_id = ? AND lang = ? GROUP BY topic", (user_id, lang)
+        )
+        out: dict[str, int] = {}
+        for topic, n in rows:
+            key = topic if topic in TOPICS else "другое"
+            out[key] = out.get(key, 0) + n
+        return out
+
     async def list_words(self, user_id: int, lang: str) -> list[Word]:
         """Словарь в алфавитном порядке языка."""
         rows = await self.db._fetchall(
@@ -302,12 +342,19 @@ class LangStore:
         )
         return {lang: (total, due or 0) for lang, total, due in rows}
 
-    async def review_words(self, user_id: int, today: str, count: int, lang: str | None = None) -> list[Word]:
+    async def review_words(self, user_id: int, today: str, count: int, lang: str | None = None,
+                           topic: str | None = None) -> list[Word]:
         """Слова на повторение: сначала просроченные, затем те, что знаешь хуже всего."""
         where, params = "user_id = ?", [user_id]
         if lang:
             where += " AND lang = ?"
             params.append(lang)
+        if topic == "другое":
+            where += f" AND topic NOT IN ({', '.join('?' for t in TOPICS if t != 'другое')})"
+            params += [t for t in TOPICS if t != "другое"]
+        elif topic:
+            where += " AND topic = ?"
+            params.append(topic)
         rows = await self.db._fetchall(
             f"SELECT {_WORD_COLS} FROM vocab WHERE {where} "
             "ORDER BY (due <= ?) DESC, due, box, wrong - correct DESC LIMIT ?",
@@ -504,7 +551,8 @@ def lookup_messages(query: str, lang_hint: str, forced: bool, level: str) -> lis
             f'"examples": [3 объекта {{"text": "простое предложение уровня {level} с этим словом", '
             '"ru": "перевод"}], '
             '"tip": "одна короткая подсказка по-русски: как запомнить, частая ошибка или '
-            'устойчивое сочетание"}'
+            'устойчивое сочетание", '
+            f'"topic": "тема слова, одна из: {", ".join(TOPICS)}"}}'
         )},
     ]
 
@@ -534,6 +582,7 @@ def parse_lookup(raw: str, lang_hint: str, forced: bool) -> dict[str, Any]:
         "grammar": str(data.get("grammar") or "").strip()[:200],
         "examples": examples[:3],
         "tip": str(data.get("tip") or "").strip()[:300],
+        "topic": parse_topic(str(data.get("topic") or "")) or "другое",
     }
 
 
@@ -562,3 +611,48 @@ def parse_phrase(raw: str) -> tuple[str, str]:
 
 def _add_days(day: str, days: int) -> str:
     return (datetime.date.fromisoformat(day) + datetime.timedelta(days=days)).isoformat()
+
+
+# ---------------------------------------------------------------- тексты для чтения
+
+
+def reading_messages(lang: str, level: str, topic: str, known: list[str]) -> list[dict[str, str]]:
+    words = f" Обязательно используй несколько слов, которые ученик уже знает: {', '.join(known)}." if known else ""
+    return [
+        {"role": "system", "content": "Ты преподаватель языка и пишешь тексты для чтения. Отвечаешь только JSON."},
+        {"role": "user", "content": (
+            f"Напиши связный интересный текст {LANGS[lang].name_in} для ученика уровня {level} на тему «{topic}»: "
+            f"{'60–100' if level == 'A1' else '100–160' if level == 'A2' else '150–220'} слов, короткие предложения, "
+            f"грамматика строго уровня {level}, 5–8 новых для ученика полезных слов.{words}\n"
+            'JSON: {"title": "заголовок на языке", "text": "текст", "ru": "перевод всего текста на русский", '
+            '"new_words": [{"word": "словарная форма (немецкие сущ. с артиклем)", "translation": "перевод", '
+            '"pos": "часть речи"}], "questions": ["3 вопроса по тексту на изучаемом языке"]}'
+        )},
+    ]
+
+
+@dataclass
+class Reading:
+    lang: str
+    topic: str
+    title: str
+    text: str
+    ru: str
+    new_words: list[dict[str, str]]
+    questions: list[str]
+
+
+def parse_reading(raw: str, lang: str, topic: str) -> Reading:
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise TutorError("модель вернула не JSON") from exc
+    text = str((data or {}).get("text") or "").strip() if isinstance(data, dict) else ""
+    if len(text) < 40:
+        raise TutorError("модель не написала текст")
+    words = [{"word": str(w.get("word") or "").strip()[:100], "translation": str(w.get("translation") or "").strip()[:200],
+              "pos": str(w.get("pos") or "").strip()[:40]}
+             for w in data.get("new_words") or [] if isinstance(w, dict) and w.get("word") and w.get("translation")]
+    questions = [str(q).strip() for q in data.get("questions") or [] if str(q).strip()]
+    return Reading(lang, topic, str(data.get("title") or "").strip()[:100] or topic, text[:3000],
+                   str(data.get("ru") or "").strip()[:3500], words[:10], questions[:5])

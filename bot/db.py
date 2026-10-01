@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS vocab (
     grammar     TEXT NOT NULL DEFAULT '',
     examples    TEXT NOT NULL DEFAULT '[]',
     tip         TEXT NOT NULL DEFAULT '',
+    topic       TEXT NOT NULL DEFAULT 'другое',
     box         INTEGER NOT NULL DEFAULT 0,
     due         TEXT NOT NULL,           -- локальная дата YYYY-MM-DD
     correct     INTEGER NOT NULL DEFAULT 0,
@@ -277,6 +278,7 @@ MIGRATIONS = [
     ("users", "tz", "TEXT"),
     ("users", "intra_login", "TEXT"),
     ("users", "intra_notified", "TEXT"),
+    ("vocab", "topic", "TEXT NOT NULL DEFAULT 'другое'"),
     # аквариумы: первая версия была с одним аквариумом
     ("aq_tasks", "tank_id", "INTEGER"),
     ("aq_facts", "tank_id", "INTEGER"),
