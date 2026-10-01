@@ -78,7 +78,7 @@ class FakeWeb:
         self.fetched: list[str] = []
         self.page_text = "Page body text"
 
-    async def search(self, query: str, limit: int = 6):
+    async def search(self, query: str, limit: int = 6, *, news: bool = False):
         self.queries.append(query)
         return [SearchResult("Ollama release", "https://example.com/ollama", "Ollama 0.34 released")]
 
@@ -181,6 +181,26 @@ class FakeYouTube:
 
         self.urls.append(url)
         return Transcript("Указатели в C", self.text, "автосубтитры (ru)", 754, url)
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeWeather:
+    def __init__(self) -> None:
+        from bot.briefing import Weather
+
+        self.weather = Weather(now_temp=9.0, code=63, t_min=7.0, t_max=12.0, rain_chance=80, rain_mm=4.0, wind=10.0)
+        self.queries: list[str] = []
+
+    async def geocode(self, name: str):
+        from bot.briefing import City
+
+        self.queries.append(name)
+        return City("Прага, Чехия", 50.08, 14.42) if name.lower().startswith("праг") else None
+
+    async def forecast(self, city):
+        return self.weather
 
     async def close(self) -> None:
         pass

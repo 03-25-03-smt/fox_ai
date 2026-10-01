@@ -248,6 +248,18 @@ CREATE TABLE IF NOT EXISTS recipes (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Утренняя сводка
+CREATE TABLE IF NOT EXISTS briefing (
+    user_id   INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    enabled   INTEGER NOT NULL DEFAULT 0,
+    time      TEXT NOT NULL DEFAULT '07:30',
+    city      TEXT,
+    lat       REAL,
+    lon       REAL,
+    topics    TEXT NOT NULL DEFAULT '',
+    last_sent TEXT
+);
+
 CREATE TABLE IF NOT EXISTS allowed_chats (
     chat_id  INTEGER PRIMARY KEY,
     title    TEXT NOT NULL DEFAULT '',

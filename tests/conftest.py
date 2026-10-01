@@ -38,7 +38,7 @@ from bot.handlers import build_router
 from bot.knowledge import KnowledgeBase
 from bot.memory import MemoryStore
 
-from .fakes import FakeImages, FakeLLM, FakeSandbox, FakeSpeech, FakeWeb, FakeYouTube
+from .fakes import FakeImages, FakeLLM, FakeSandbox, FakeSpeech, FakeWeather, FakeWeb, FakeYouTube
 
 ADMIN, FRIEND, STRANGER = 10, 20, 30
 GROUP = -100500
@@ -123,7 +123,7 @@ class Env:
             settings=self.settings, db=self.db, assistant=self.assistant,
             sandbox=self.sandbox, speech=self.speech, imagegen=self.images,
             queue=GpuQueue(self.settings.max_concurrent), bot_username=BOT_USERNAME,
-            youtube=FakeYouTube(),
+            youtube=FakeYouTube(), weather=FakeWeather(),
         )
         self.youtube = self.app.youtube
         self.session = FakeSession()

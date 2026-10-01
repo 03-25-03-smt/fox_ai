@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from .aquarium import Aquarium
 from .aquarium_brain import AquariumBrain
+from .briefing import BriefingStore
 from .config import Settings
 from .db import Database, User
 from .docs import PersonalDocs
@@ -156,6 +157,7 @@ class Assistant:
         self.docs = docs or PersonalDocs(db, llm, settings.embed_model)
         self.lang = LangStore(db)
         self.kitchen = Kitchen(db)
+        self.briefing = BriefingStore(db)
         self.sandbox = None  # SandboxClient: инструмент run_python
         # Картинки, которые построил run_python во время ответа: chat_id -> PNG
         self.images: defaultdict[int, list[bytes]] = defaultdict(list)

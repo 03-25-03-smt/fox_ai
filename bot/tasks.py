@@ -13,6 +13,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .app import App
 from .aquarium_bot import tick as aquarium_tick
+from .handlers.briefing import send_briefings
 from .backup import backup_database
 from .gpu import query_gpus
 from .intra import IntraError
@@ -192,6 +193,7 @@ def start_background(bot: Bot, app: App) -> None:
     app.spawn(_loop("gpu", GPU_INTERVAL, gpu_step))
     async def lang_step() -> None:
         await send_daily_reviews(bot, app)
+        await send_briefings(bot, app)
 
     app.spawn(_loop("schedule", SCHEDULE_INTERVAL, schedule_step))
     app.spawn(_loop("lang", LANG_INTERVAL, lang_step))

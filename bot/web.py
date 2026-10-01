@@ -106,13 +106,14 @@ class WebTools:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def search(self, query: str, limit: int = 6) -> list[SearchResult]:
-        """Поиск через свой SearXNG (он внутренний, поэтому SSRF-проверка не нужна)."""
+    async def search(self, query: str, limit: int = 6, *, news: bool = False) -> list[SearchResult]:
+        """Поиск через свой SearXNG (он внутренний, поэтому SSRF-проверка не нужна).
+        news=True — новости за последние сутки."""
+        params = {"q": query, "format": "json", "safesearch": 1}
+        if news:
+            params.update(categories="news", time_range="day")
         try:
-            resp = await self._client.get(
-                f"{self._searxng_url}/search",
-                params={"q": query, "format": "json", "safesearch": 1},
-            )
+            resp = await self._client.get(f"{self._searxng_url}/search", params=params)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             raise WebError(f"Поиск недоступен: {exc}") from exc
