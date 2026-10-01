@@ -262,7 +262,8 @@ class Assistant:
 
         if mode.key == "aquarium":
             today = self.aquarium.now().date()
-            parts.append(await self.aquarium_brain.context(await self.aquarium.care_summary(today)))
+            parts.append(await self.aquarium_brain.context(
+                self.aquarium, await self.aquarium.care_summary(today)))
 
         if mode.key == "defense":
             state = await self.db.get_state(turn.chat_id)
@@ -426,7 +427,8 @@ class Assistant:
         if (extract_memory and self.mode_for(turn).key == "aquarium"
                 and turn.user_id in self.settings.aquarium_members):
             # Аквариумист запоминает из разговора то, что узнал об аквариуме
-            await self.aquarium_brain.learn(self.llm, self.settings.default_model, user_text, source="chat")
+            await self.aquarium_brain.learn(self.llm, self.settings.default_model, user_text,
+                                            await self.aquarium.tanks(), source="chat")
         await self.summarize_if_needed(turn.chat_id)
 
     async def translate_to_english(self, text: str) -> str:

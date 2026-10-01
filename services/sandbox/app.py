@@ -13,6 +13,7 @@ import re
 import resource
 import shutil
 import signal
+import sys
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
@@ -364,7 +365,8 @@ async def run_python(req: PythonRequest) -> PythonResponse:
                 encoding="utf-8",
             )
             run = await _run(
-                ["python3", "-I", "main.py"], root, req.timeout,
+                # Тот же интерпретатор, что у сервиса: в нём стоят numpy, pandas, matplotlib
+                [sys.executable, "-I", "main.py"], root, req.timeout,
                 env={"MPLBACKEND": "Agg", "MPLCONFIGDIR": str(root), "OPENBLAS_NUM_THREADS": "1"},
             )
             images = []

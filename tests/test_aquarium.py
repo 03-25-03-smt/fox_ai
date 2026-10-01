@@ -1,22 +1,21 @@
-"""Аквариум (бывший fish_helper): расписание, кнопки, отчёты, знания, вопросы, импорт."""
+"""Аквариумы владельца: несколько аквариумов, график ухода от агента, кнопки, отчёты,
+знания, вопрос дня, тесты воды и графики."""
 
 import datetime
 import json
-import sqlite3
 import zoneinfo
 
 import pytest
-from aiogram.methods import EditMessageText, SendMessage
+from aiogram.methods import EditMessageText, SendMessage, SendPhoto
 
+from bot.aquarium import parse_days, parse_tanks_spec
 from bot.aquarium_bot import tick
-from bot.aquarium_brain import parse_water, water_warnings
+from bot.aquarium_brain import parse_plan, parse_water, water_chart_code, water_warnings
 
 from .conftest import ADMIN, FRIEND
 
-BROTHER = 40
 PRAGUE = zoneinfo.ZoneInfo("Europe/Prague")
-# 2026-10-05 — понедельник, 08 — четверг (разгрузочный), 11 — воскресенье
-MONDAY = datetime.date(2026, 10, 5)
+MONDAY = datetime.date(2026, 10, 5)  # 11.10 — воскресенье
 
 
 def at(day: datetime.date, hour: int, minute: int = 0) -> datetime.datetime:
@@ -25,83 +24,218 @@ def at(day: datetime.date, hour: int, minute: int = 0) -> datetime.datetime:
 
 @pytest.fixture
 async def aq_env(make_env):
-    env = await make_env(aquarium_caretaker_ids=str(BROTHER), aquarium_timezone="Europe/Prague",
-                         aquarium_owner_name="Владу")
+    env = await make_env(aquarium_timezone="Europe/Prague")
     env.aq = env.assistant.aquarium
     env.brain = env.assistant.aquarium_brain
+    await env.aq.seed(env.settings.aquarium_tanks)
+    env.big, env.nano = await env.aq.tanks()
     return env
 
 
-def sent_to(env, chat_id: int) -> list[SendMessage]:
-    return [m for m in env.session.of_type(SendMessage) if m.chat_id == chat_id]
+def to_owner(env) -> list[SendMessage]:
+    return [m for m in env.session.of_type(SendMessage) if m.chat_id == ADMIN]
 
 
-def texts_to(env, chat_id: int) -> str:
-    return "\n".join(m.text for m in sent_to(env, chat_id))
+def owner_text(env) -> str:
+    return "\n".join(m.text for m in to_owner(env))
 
 
 async def run(env, now: datetime.datetime) -> None:
     await tick(env.bot, env.app, now)
 
 
-# ---------------------------------------------------------------- расписание и кнопки
+async def add_feed(env, time=datetime.time(7, 0), days=(0, 1, 2, 3, 4, 5, 6)) -> int:
+    return await env.aq.add_item(env.big.id, "Покормить рыб", time, days, "feed")
 
 
-async def test_schedule_sends_once_and_done_notifies_owner(aq_env):
+# ---------------------------------------------------------------- разбор
+
+
+def test_parsers():
+    assert parse_tanks_spec("Большой:85, Нано:5") == [("Большой", 85.0), ("Нано", 5.0)]
+    assert parse_days("пн-пт") == (0, 1, 2, 3, 4)
+    assert parse_days("сб-пн") == (0, 5, 6)
+    assert parse_days("ср,вс") == (2, 6)
+    assert parse_days("каждый") == tuple(range(7))
+    assert parse_days("завтра") is None
+    plan = parse_plan(json.dumps({"items": [
+        {"title": "Подмена 30%", "kind": "water", "time": "12:00", "days": [6], "why": "нитраты"},
+        {"title": "Кормить", "kind": "feed", "time": "7:30", "days": "пн-сб"},
+        {"title": "Без времени", "days": [1]},
+        {"title": "Странный вид", "kind": "dance", "time": "9:00", "days": [9, 1]},
+    ]}))
+    assert [p["title"] for p in plan] == ["Подмена 30%", "Кормить", "Странный вид"]
+    assert plan[1]["days"] == (0, 1, 2, 3, 4, 5) and plan[2]["kind"] == "other" and plan[2]["days"] == (1,)
+    assert parse_plan("не json") == []
+
+
+def test_water_parsing():
+    assert parse_water("pH 7,2 NO2 0 no3=25 KH:6 T 25.5") == {"ph": 7.2, "no2": 0, "no3": 25, "kh": 6, "t": 25.5}
+    assert parse_water("NO₂ 0.5") == {"no2": 0.5}
+    warnings = water_warnings({"no2": 0.5, "ph": 7.0, "t": 20})
+    assert len(warnings) == 2 and "NO₂" in warnings[0] and "ниже" in warnings[1]
+
+
+async def test_tanks_seeded_once(aq_env):
     env = aq_env
-    await run(env, at(MONDAY, 6, 59))
-    assert not sent_to(env, BROTHER)
-    await run(env, at(MONDAY, 7, 0))
-    msgs = sent_to(env, BROTHER)
-    assert len(msgs) == 2  # кормление и воздух
-    assert "Покормить" in msgs[0].text or "Покормить" in msgs[1].text
-    assert all("опозданием" not in m.text for m in msgs)
-    await run(env, at(MONDAY, 7, 1))
-    assert len(sent_to(env, BROTHER)) == 2  # повторно не шлём
-    assert not sent_to(env, ADMIN)  # владельцу задачи не приходят
+    assert (env.big.label, env.nano.label) == ("Большой (85 л)", "Нано (5 л)")
+    await env.aq.seed("Другой:10")
+    assert len(await env.aq.tanks()) == 2
+    assert (await env.aq.find_tank("85")).id == env.big.id
+    assert (await env.aq.find_tank("5л")).id == env.nano.id
+    assert (await env.aq.find_tank("нано")).id == env.nano.id
+    assert await env.aq.find_tank("pH") is None
 
-    await env.click(BROTHER, f"aq:done:{MONDAY}:feed")
-    edit = env.session.of_type(EditMessageText)[-1]
-    assert "Выполнено" in edit.text
-    assert "выполнил" in texts_to(env, ADMIN)
-    await env.click(BROTHER, f"aq:done:{MONDAY}:feed")  # второе нажатие — без второго уведомления
-    assert texts_to(env, ADMIN).count("выполнил") == 1
+
+# ---------------------------------------------------------------- доступ
+
+
+async def test_only_owner(aq_env):
+    env = aq_env
+    await env.send(FRIEND, "/aq")
+    assert "Не знаю такую команду" in env.last_text()
+    await env.send(FRIEND, "/mode")
+    assert "Аквариумист" not in str(env.session.of_type(SendMessage)[-1].reply_markup)
+    await env.send(ADMIN, "/aq")
+    menu = env.session.of_type(SendMessage)[-1]
+    assert "Мои аквариумы" in menu.text and menu.reply_markup.keyboard[0][0].text == "📋 Сегодня"
+
+
+# ---------------------------------------------------------------- график и задачи
+
+
+async def test_schedule_sends_once_and_buttons(aq_env):
+    env = aq_env
+    await add_feed(env)
+    await env.aq.add_item(env.nano.id, "Подмена 20% воды", datetime.time(7, 0), (0,), "water")
+    await run(env, at(MONDAY, 6, 59))
+    assert not to_owner(env)
+    await run(env, at(MONDAY, 7, 0))
+    text = owner_text(env)
+    assert "Большой: Покормить рыб" in text and "Нано: Подмена 20% воды" in text
+    await run(env, at(MONDAY, 7, 1))
+    assert len(to_owner(env)) == 2
+
+    key = (await env.aq.schedule(env.big.id))[0].key
+    await env.click(ADMIN, f"aq:done:{MONDAY}:{key}")
+    assert "Сделано" in env.session.of_type(EditMessageText)[-1].text
+    row = await env.aq.get_task(MONDAY.isoformat(), key)
+    assert row["completed_at"] and row["tank_id"] == env.big.id
 
 
 async def test_missed_tasks_resent_after_restart(aq_env):
     env = aq_env
-    await run(env, at(MONDAY, 9, 30))  # бот лежал с 7:00 — досылаем, это меньше 3 часов
-    text = texts_to(env, BROTHER)
-    assert "Покормить" in text and "С опозданием" in text and "07:00" in text
-    assert "Досланы пропущенные" in texts_to(env, ADMIN)
-
-    other = await env.app.assistant.aquarium.get_task(MONDAY.isoformat(), "light_on")
-    assert other is None
+    await add_feed(env)
+    await env.aq.add_item(env.big.id, "Включить свет", datetime.time(14, 30), tuple(range(7)), "light")
+    await run(env, at(MONDAY, 9, 30))
+    assert "С опозданием" in owner_text(env) and "07:00" in owner_text(env)
     await run(env, at(MONDAY, 17, 31))  # свет в 14:30 — больше 3 часов назад, уже не шлём
-    assert await env.aq.get_task(MONDAY.isoformat(), "light_on") is None
+    assert "Включить свет" not in owner_text(env)
 
 
-async def test_fasting_day(aq_env):
+async def test_reminder_overdue_snooze_and_reasons(aq_env):
     env = aq_env
-    thursday = MONDAY + datetime.timedelta(days=3)
-    await run(env, at(thursday, 7, 0))
-    text = texts_to(env, BROTHER)
-    assert "разгрузочный день" in text and "Покормить" not in text and "воздух" in text
-    await run(env, at(thursday, 7, 5))
-    assert texts_to(env, BROTHER).count("разгрузочный") == 1
+    item = await add_feed(env, datetime.time(2, 0))
+    key = f"s{item}"
+    await run(env, at(MONDAY, 2, 0))
+    await run(env, at(MONDAY, 2, 31))
+    assert "Напоминание" in owner_text(env)
+    await run(env, at(MONDAY, 3, 1))
+    assert "Просрочено" in owner_text(env)
+    await run(env, at(MONDAY, 3, 2))
+    assert owner_text(env).count("Просрочено") == 1
+
+    date = MONDAY.isoformat()
+    for _ in range(4):
+        await env.click(ADMIN, f"aq:snooze:{date}:{key}")
+    assert (await env.aq.get_task(date, key))["snooze_count"] == 3
+    await env.click(ADMIN, f"aq:why:{date}:{key}:other")
+    await env.send(ADMIN, "корм закончился")
+    assert (await env.aq.get_task(date, key))["cant_reason"] == "корм закончился"
+    env.llm.calls.clear()
+    await env.send(ADMIN, "привет")  # дальше обычный текст снова идёт в чат
+    assert env.llm.calls
 
 
-async def test_reminder_and_overdue(aq_env):
+async def test_pause_and_resume(aq_env):
     env = aq_env
-    now = at(MONDAY, 3, 0)  # ночью по расписанию ничего нет
-    await env.aq.save_task("feed", now - datetime.timedelta(minutes=31))
-    await run(env, now)
-    assert "Напоминание" in texts_to(env, BROTHER) and not sent_to(env, ADMIN)
-    await run(env, now + datetime.timedelta(minutes=30))
-    assert "Просроченная задача" in texts_to(env, BROTHER) and "Просроченная задача" in texts_to(env, ADMIN)
-    await run(env, now + datetime.timedelta(minutes=31))
-    assert texts_to(env, ADMIN).count("Просроченная") == 1
+    await add_feed(env)
+    await env.send(ADMIN, "/aqpause")
+    await run(env, at(MONDAY, 7, 0))
+    assert "Покормить" not in owner_text(env)
+    await env.aq.resume(at(MONDAY, 8, 0))
+    await run(env, at(MONDAY, 8, 1))
+    assert "Покормить" not in owner_text(env)  # задачи времён паузы не досылаем
 
+
+async def test_manual_schedule_commands(aq_env):
+    env = aq_env
+    await env.send(ADMIN, "/aqadd 5 19:00 ср,вс Почистить губку фильтра")
+    assert "🧽" in env.last_text() and "ср, вс" in env.last_text()
+    (item,) = await env.aq.schedule(env.nano.id)
+    assert item.kind == "filter" and item.days == (2, 6)
+    await env.send(ADMIN, f"/aqsettime {item.id} 20:15")
+    assert (await env.aq.item(item.id)).at == datetime.time(20, 15)
+    await env.send(ADMIN, "📋 Сегодня")
+    await env.send(ADMIN, "🗂 График ухода")
+    assert "Почистить губку фильтра" in env.last_text() and "пусто" in env.last_text()
+    await env.send(ADMIN, "/aqadd 19:00 ср Почистить")  # без аквариума при двух аквариумах
+    assert "Укажи аквариум" in env.last_text()
+    await env.send(ADMIN, f"/aqdel {item.id}")
+    assert not await env.aq.schedule()
+
+
+async def test_agent_proposes_plan(aq_env):
+    env = aq_env
+    plan = {"items": [
+        {"title": "Подмена 25% воды", "kind": "water", "time": "11:00", "days": [6], "why": "5 л быстро грязнится"},
+        {"title": "Покормить петушка", "kind": "feed", "time": "07:30", "days": [0, 1, 2, 3, 4, 5]},
+    ]}
+    env.llm.scripted.append(("недельный график", json.dumps(plan)))
+    await env.brain.add_fact(env.nano.id, "fish", "Живёт петушок")
+    await env.send(ADMIN, "/aqplan нано")
+    offer = to_owner(env)[-1]
+    assert "Предлагаю график ухода: Нано (5 л)" in offer.text and "Подмена 25% воды" in offer.text
+    prompt = [c for c in env.llm.chat_calls if "недельный график" in c["messages"][-1]["content"]][0]
+    assert "Живёт петушок" in prompt["messages"][-1]["content"]
+    await env.click(ADMIN, f"aqp:ok:{env.nano.id}")
+    titles = [i.title for i in await env.aq.schedule(env.nano.id)]
+    assert titles == ["Покормить петушка", "Подмена 25% воды"]
+    await env.click(ADMIN, f"aqp:ok:{env.nano.id}")
+    assert "устарело" in env.last_text()
+
+
+async def test_plan_offered_when_agent_knows_enough(aq_env):
+    env = aq_env
+    env.llm.scripted.append(("недельный график", json.dumps(
+        {"items": [{"title": "Кормить", "kind": "feed", "time": "07:00", "days": [0]}]})))
+    await env.brain.add_fact(env.big.id, "fish", "10 неонов")
+    await env.brain.add_fact(env.big.id, "equipment", "Внешний фильтр")
+    await run(env, at(MONDAY, 18, 0))
+    assert "Предлагаю график ухода: Большой (85 л)" in owner_text(env)
+    assert "Вопрос про" not in owner_text(env)  # в этот день вместо вопроса
+    await run(env, at(MONDAY + datetime.timedelta(days=1), 18, 0))
+    assert "Вопрос про" in owner_text(env)  # повторно график не навязываем
+
+
+async def test_report_weekly_advice_and_chart(aq_env):
+    env = aq_env
+    env.llm.chat_reply = "1. Нано: подменяй 20% дважды в неделю."
+    item = await add_feed(env, datetime.time(7, 0), (4, 5, 6))
+    sunday = MONDAY + datetime.timedelta(days=6)
+    for offset in (2, 1, 0):
+        day = sunday - datetime.timedelta(days=offset)
+        date, _ = await env.aq.save_task(f"s{item}", "Покормить", env.big.id, at(day, 7))
+        await env.aq.complete(date, f"s{item}", ADMIN, "Влад")
+    await run(env, at(sunday, 23, 15))
+    assert "Серия без пропусков: 3" in owner_text(env) and "3 дня без пропусков" in owner_text(env)
+    await run(env, at(sunday, 23, 20))
+    weekly = owner_text(env)
+    assert "Статистика за 7 дней" in weekly and "Советы на неделю" in weekly and "Большой (85 л): 3/3" in weekly
+    assert env.session.of_type(SendPhoto)  # график ухода через песочницу
+    assert "fig" in env.sandbox.python_runs[-1] or "plt" in env.sandbox.python_runs[-1]
+    await run(env, at(sunday, 23, 25))
+    assert owner_text(env).count("Статистика за 7 дней") == 1
 
 
 async def test_overdue_test_command(aq_env):
@@ -109,237 +243,115 @@ async def test_overdue_test_command(aq_env):
     await env.send(ADMIN, "/aqoverdue_test")
     await env.send(ADMIN, "⚠️ Просрочки")
     assert "Тестовая просроченная" in env.last_text()
-    await env.send(BROTHER, "⚠️ Просрочки")  # тестовые видит только владелец
-    assert "Просроченных задач нет" in env.last_text()
-    await run(env, env.aq.now())
-    assert "Тестовая просроченная" in texts_to(env, BROTHER)
+    await env.send(ADMIN, "/aqtest")
+    assert "Тестовая задача" in owner_text(env)
 
 
-async def test_snooze_and_cant(aq_env):
+# ---------------------------------------------------------------- знания и вопросы
+
+
+async def test_aquarist_mode_context_and_learning(aq_env):
     env = aq_env
-    now = env.aq.now()
-    date, _ = await env.aq.save_task("feed", now)
-    for _ in range(3):
-        await env.click(BROTHER, f"aq:snooze:{date}:feed")
-    assert "Можно отложить ещё: 0" in env.session.of_type(EditMessageText)[-1].text
-    await env.click(BROTHER, f"aq:snooze:{date}:feed")
-    assert (await env.aq.get_task(date, "feed"))["snooze_count"] == 3
-
-    await env.click(BROTHER, f"aq:why:{date}:feed:nothing")
-    assert "Я передал Владу" in env.session.of_type(EditMessageText)[-1].text
-    assert "не может выполнить" in texts_to(env, ADMIN) and "Нечем" in texts_to(env, ADMIN)
-
-    date, _ = await env.aq.save_task("air_on", now)
-    await env.click(BROTHER, f"aq:why:{date}:air_on:other")
-    await env.send(BROTHER, "компрессор сломался")
-    assert (await env.aq.get_task(date, "air_on"))["cant_reason"] == "компрессор сломался"
-    assert "компрессор сломался" in texts_to(env, ADMIN)
-    env.llm.calls.clear()
-    await env.send(BROTHER, "привет")  # дальше обычный текст снова идёт в чат
-    assert env.llm.calls
-
-
-async def test_pause_skips_and_resume_does_not_backfill(aq_env):
-    env = aq_env
-    await env.send(ADMIN, "/aqpause")
-    assert "на паузе" in texts_to(env, BROTHER)
-    await run(env, at(MONDAY, 7, 0))
-    assert "Покормить" not in texts_to(env, BROTHER)
-    await env.aq.resume(at(MONDAY, 8, 0))
-    await run(env, at(MONDAY, 8, 1))
-    assert "Покормить" not in texts_to(env, BROTHER)  # задачи времён паузы не досылаем
-    await run(env, at(MONDAY, 14, 30))
-    assert "Включить свет" in texts_to(env, BROTHER)
-
-    await env.send(BROTHER, "/aqpause")  # команды владельца брату недоступны
-    assert not await env.aq.is_paused()
-
-
-async def test_daily_report_streaks_and_weekly_advice(aq_env):
-    env = aq_env
-    env.llm.chat_reply = "1. Подменяй 20% воды."
-    sunday = MONDAY + datetime.timedelta(days=6)
-    for offset in range(3):
-        day = sunday - datetime.timedelta(days=2 - offset)
-        tasks = await env.aq.tasks_for(day) if day == sunday else [(None, "feed")]
-        for _, task_id in tasks:
-            date, _ = await env.aq.save_task(task_id, at(day, 7))
-            await env.aq.complete(date, task_id, BROTHER, "Брат")
-    await run(env, at(sunday, 23, 15))
-    report = texts_to(env, ADMIN)
-    assert "Отчёт по аквариуму" in report and "Серия без пропусков: 3" in report
-    assert "3 дня без пропусков" in texts_to(env, BROTHER)
-    await run(env, at(sunday, 23, 20))
-    weekly = texts_to(env, BROTHER)
-    assert "Статистика за 7 дней" in weekly and "Советы на неделю" in weekly and "20%" in weekly
-    advice_prompt = env.llm.chat_calls[-1]["messages"][-1]["content"]
-    assert "выполнено 9 из 9" in advice_prompt
-    await run(env, at(sunday, 23, 25))
-    assert texts_to(env, BROTHER).count("Статистика за 7 дней") == 1
-
-
-# ---------------------------------------------------------------- доступ и аквариумист
-
-
-async def test_brother_gets_aquarium_bot(aq_env):
-    env = aq_env
-    await env.send(BROTHER, "/start")
-    first = sent_to(env, BROTHER)[-1]
-    assert "аквариум" in first.text and "norminette" not in first.text
-    assert first.reply_markup.keyboard[0][0].text == "📋 Сегодня"
-    assert (await env.db.get_user(BROTHER)).mode == "aquarium"
-
-    await env.send(FRIEND, "/aq")
-    assert "Не знаю такую команду" in env.last_text()
-
-    await env.brain.add_fact("fish", "6 гуппи и 2 сомика")
-    await env.send(BROTHER, "Рыбки плавают у поверхности, что делать?")
+    await env.db.add_user(ADMIN)
+    await env.db.set_mode(ADMIN, "aquarium")
+    await env.brain.add_fact(env.big.id, "fish", "10 неонов")
+    await env.aq.add_item(env.big.id, "Подмена 30%", datetime.time(12, 0), (6,), "water")
+    env.llm.scripted.append(("Сообщение владельца", json.dumps(
+        {"facts": [{"tank": env.nano.id, "topic": "fish", "text": "Живёт петушок"}], "outdated": []})))
+    await env.send(ADMIN, "В нано теперь живёт петушок")
     system = env.system_prompt()
-    assert "аквариумист" in system and "6 гуппи и 2 сомика" in system
+    assert "аквариумист" in system and "Большой (85 л)" in system and "10 неонов" in system
+    assert "Подмена 30% 12:00 (вс)" in system
+    assert [f.text for f in await env.brain.facts(env.nano.id) if f.tank_id == env.nano.id] == ["Живёт петушок"]
 
-
-async def test_learns_from_conversation(aq_env):
-    env = aq_env
+    fact = (await env.brain.facts(env.big.id, "fish"))[0]
     env.llm.scripted.append(("Сообщение владельца", json.dumps(
-        {"facts": [{"topic": "fish", "text": "Появились 3 неона"}], "outdated": []}
-    )))
-    await env.send(BROTHER, "Мы купили 3 неона!")
-    facts = await env.brain.facts("fish")
-    assert [f.text for f in facts] == ["Появились 3 неона"]
-
-    env.llm.scripted.append(("Сообщение владельца", json.dumps(
-        {"facts": [{"topic": "fish", "text": "Неонов осталось 2"}], "outdated": [facts[0].id]}
-    )))
-    await env.send(BROTHER, "один неон погиб")
-    assert [f.text for f in await env.brain.facts("fish")] == ["Неонов осталось 2"]
-
-    await env.send(ADMIN, "/mode")  # у владельца режим аквариумиста тоже есть, у друга — нет
-    owner_buttons = str(env.session.of_type(SendMessage)[-1].reply_markup)
-    await env.send(FRIEND, "/mode")
-    assert "Аквариумист" in owner_buttons
-    assert "Аквариумист" not in str(env.session.of_type(SendMessage)[-1].reply_markup)
+        {"facts": [{"tank": env.big.id, "topic": "fish", "text": "Неонов 9"}], "outdated": [fact.id]})))
+    await env.send(ADMIN, "один неон погиб")
+    assert [f.text for f in await env.brain.facts(env.big.id, "fish") if f.tank_id] == ["Неонов 9"]
 
 
-async def test_question_of_the_day(aq_env):
+async def test_question_of_the_day_alternates_tanks(aq_env):
     env = aq_env
     now = at(MONDAY, 18, 0)
-    assert await env.brain.choose_topic(now) == "tank"  # сначала самое базовое
+    assert await env.brain.choose_topic([env.big, env.nano], now) == (env.big, "tank")
     await run(env, now)
-    question = sent_to(env, ADMIN)[-1]
-    assert "Вопрос про аквариум" in question.text and "объём" in question.text
+    question = to_owner(env)[-1]
+    assert "Вопрос про Большой (85 л)" in question.text
     await run(env, now + datetime.timedelta(minutes=5))
-    assert texts_to(env, ADMIN).count("Вопрос про аквариум") == 1  # раз в день
-    assert await env.brain.choose_topic(now) == "fish"  # «tank» только что спрашивали
+    assert owner_text(env).count("Вопрос про") == 1
+    assert await env.brain.choose_topic([env.big, env.nano], now) == (env.nano, "tank")
 
     env.llm.scripted.append(("Вопрос агента", json.dumps(
-        {"facts": [{"topic": "tank", "text": "Объём 60 литров"}], "outdated": []}
-    )))
+        {"facts": [{"tank": None, "topic": "tank", "text": "Запущен год назад"}], "outdated": []})))
     (msg_id,) = await env.db._fetchone("SELECT tg_msg_id FROM aq_questions")
-    await env.send(ADMIN, "просто про C")  # без ответа на вопрос — обычный чат
-    assert not await env.brain.facts("tank")
+    await env.send(ADMIN, "просто про C")  # не ответ на вопрос — обычный чат
+    assert not await env.brain.facts(env.big.id, "tank")
     asked = env.message(ADMIN, text=question.text).model_copy(update={"message_id": msg_id})
-    await env.send(ADMIN, "60 литров, запущен год назад", reply_to_message=asked)
-    assert "Объём 60 литров" in "\n".join(env.texts())
-    assert [f.text for f in await env.brain.facts("tank")] == ["Объём 60 литров"]
-    assert "60 литров, запущен год назад" in env.last_user_prompt()
+    await env.send(ADMIN, "запущен год назад, стоит у стены", reply_to_message=asked)
+    facts = await env.brain.facts(env.big.id, "tank")
+    assert [(f.tank_id, f.text) for f in facts] == [(env.big.id, "Запущен год назад")]  # tank из вопроса
+    assert "запущен год назад, стоит у стены" in env.last_user_prompt()
     assert await env.brain.question_by_msg(ADMIN, msg_id) is None
 
 
 async def test_question_buttons(aq_env):
     env = aq_env
     await env.send(ADMIN, "/aqask")
-    q = (await env.db._fetchone("SELECT id FROM aq_questions"))[0]
+    (q,) = await env.db._fetchone("SELECT id FROM aq_questions")
     await env.click(ADMIN, f"aqq:answer:{q}")
     env.llm.scripted.append(("Вопрос агента", json.dumps(
-        {"facts": [{"topic": "tank", "text": "Объём 100 литров"}], "outdated": []}
-    )))
-    await env.send(ADMIN, "100 литров")
-    assert [f.text for f in await env.brain.facts("tank")] == ["Объём 100 литров"]
+        {"facts": [{"topic": "tank", "text": "Стоит у окна"}], "outdated": []})))
+    await env.send(ADMIN, "у окна")
+    assert [f.text for f in await env.brain.facts(env.big.id, "tank")] == ["Стоит у окна"]
     await env.click(ADMIN, f"aqq:answer:{q}")
     assert "уже закрыт" in str(env.session.requests[-1])
-
     await env.send(ADMIN, "/aqask")
-    q2 = (await env.db._fetchone("SELECT id FROM aq_questions ORDER BY id DESC"))[0]
+    (q2,) = await env.db._fetchone("SELECT id FROM aq_questions ORDER BY id DESC")
     await env.click(ADMIN, f"aqq:skip:{q2}")
-    assert (await env.brain.get_question(q2))[4] == -1
-    await env.click(BROTHER, f"aqq:answer:{q}")  # чужой вопрос
-    assert "уже закрыт" in str(env.session.requests[-1])
+    assert (await env.brain.get_question(q2))[5] == -1
 
 
-async def test_tank_command(aq_env):
+async def test_tank_commands(aq_env):
     env = aq_env
-    await env.send(BROTHER, "/tank add фильтр внутренний, 300 л/ч")  # модель ничего не вернула
+    await env.send(ADMIN, "/tank add 5 фильтр-губка от компрессора")  # модель ничего не извлекла
     assert "Запомнил" in env.last_text()
-    await env.send(BROTHER, "🐠 Что я знаю")
-    assert "фильтр внутренний" in env.last_text()
-    fid = (await env.brain.facts())[0].id
-    await env.send(BROTHER, f"/tank del {fid}")
-    assert "только владелец" in env.last_text()
-    await env.send(ADMIN, f"/tank del {fid}")
+    (fact,) = await env.brain.facts(env.nano.id)
+    assert fact.tank_id == env.nano.id
+    await env.send(ADMIN, "🐠 Что я знаю")
+    assert "фильтр-губка" in env.last_text() and "Ещё не знаю" in env.last_text()
+    await env.send(ADMIN, f"/tank del {fact.id}")
     assert not await env.brain.facts()
+    await env.send(ADMIN, "/aqtank add Креветочник 20")
+    assert len(await env.aq.tanks()) == 3
+    await env.send(ADMIN, "/aqtank")
+    assert "Креветочник (20 л)" in env.last_text()
 
 
-# ---------------------------------------------------------------- вода
-
-
-def test_parse_water():
-    assert parse_water("pH 7,2 NO2 0 no3=25 KH:6 T 25.5") == {"ph": 7.2, "no2": 0, "no3": 25, "kh": 6, "t": 25.5}
-    assert parse_water("NO₂ 0.5") == {"no2": 0.5}
-    assert parse_water("просто текст") == {}
-    warnings = water_warnings({"no2": 0.5, "ph": 7.0, "t": 20})
-    assert len(warnings) == 2 and "NO₂" in warnings[0] and "ниже" in warnings[1]
-
-
-async def test_water_command_alerts_owner(aq_env):
+async def test_water_per_tank_with_chart(aq_env):
     env = aq_env
-    await env.send(BROTHER, "/water pH 7 NO2 0.5")
-    assert "выше нормы" in env.last_text()
-    assert "Тест воды" in texts_to(env, ADMIN)
-    await env.send(BROTHER, "/water pH 7.2 NO2 0")
+    await env.send(ADMIN, "/water pH 7")
+    assert "Укажи аквариум" in env.last_text()
+    await env.send(ADMIN, "/water 5 pH 7 NO2 0.5")
+    assert "Нано (5 л)" in env.last_text() and "выше нормы" in env.last_text()
+    await env.send(ADMIN, "/water 5 pH 7.2 NO2 0")
     assert "Всё в норме" in env.last_text()
-    await env.send(BROTHER, "/water")
-    assert "0 ← 0.5" in env.last_text()
+    await env.send(ADMIN, "/water 85 pH 6.8")
+    await env.send(ADMIN, "/water 5")
+    texts = "\n".join(env.texts())
+    assert "0 ← 0.5" in texts and "6.8" not in texts.split("Вода: Нано")[-1]
+    assert env.session.of_type(SendPhoto)
+    code = env.sandbox.python_runs[-1]
+    assert "matplotlib" in code and "Нано" in code
+    await env.send(ADMIN, "💧 Вода")
+    assert "последний тест" in env.last_text()
 
 
-# ---------------------------------------------------------------- перенос со старого бота
+def test_water_chart_code_runs():
+    """Код графика корректен: компилируется и правильно экранирует данные."""
+    from bot.aquarium import Tank
 
-
-def make_legacy_db(path) -> None:
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-        CREATE TABLE tasks (id INTEGER PRIMARY KEY, date TEXT, task_id TEXT, task_name TEXT, sent_at TEXT,
-            completed_at TEXT, completed_by INTEGER, completed_by_name TEXT, overdue_notified INTEGER,
-            reminded INTEGER, remind_at TEXT, overdue_at TEXT, snooze_count INTEGER, cant_at TEXT,
-            cant_reason TEXT, cant_by_name TEXT, UNIQUE(date, task_id));
-        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
-        CREATE TABLE schedule_overrides (task_id TEXT PRIMARY KEY, time TEXT);
-        CREATE TABLE achievements (streak INTEGER PRIMARY KEY, achieved_at TEXT);
-        INSERT INTO tasks (date, task_id, task_name, sent_at, completed_at, completed_by_name, snooze_count)
-            VALUES ('2026-09-30', 'feed', '🐟 Покормить рыбок', '2026-09-30T07:00:00+02:00',
-                    '2026-09-30T07:10:00+02:00', 'Брат', 0),
-                   ('2026-09-30', 'air_on', '💨 Включить воздух', '2026-09-30T07:00:00+02:00',
-                    NULL, NULL, NULL);
-        INSERT INTO schedule_overrides VALUES ('light_on', '15:00');
-        INSERT INTO achievements VALUES (3, '2026-09-20T23:15:00+02:00');
-    """)
-    conn.commit()
-    conn.close()
-
-
-async def test_import_legacy_database(aq_env, tmp_path):
-    env = aq_env
-    make_legacy_db(tmp_path / "aquarium.db")
-    data = (tmp_path / "aquarium.db").read_bytes()
-    await env.send_file(ADMIN, "aquarium.db", data, caption="/aqimport")
-    assert "Перенесено задач: 2 из 2" in env.last_text()
-    row = await env.aq.get_task("2026-09-30", "feed")
-    assert row["completed_by_name"] == "Брат" and row["reminded"] == 1
-    assert {i.task_id: i.at.strftime("%H:%M") for i in await env.aq.schedule()}["light_on"] == "15:00"
-    assert await env.aq.achieved() == [3]
-    await env.send_file(ADMIN, "aquarium.db", data, caption="/aqimport")
-    assert "Перенесено задач: 0 из 2" in env.last_text()
-
-    await env.send_file(BROTHER, "aquarium.db", data, caption="/aqimport")  # не владелец
-    assert "Перенесено" not in env.last_text()
-    await env.send_file(ADMIN, "aquarium.db", b"not sqlite", caption="/aqimport")
-    assert "не база SQLite" in env.last_text()
+    code = water_chart_code(Tank(1, 'Нано "5"', 5), [("ph", "2026-10-01 10:00:00", 7.0),
+                                                     ("ph", "2026-10-03 10:00:00", 7.4)])
+    compile(code, "chart", "exec")
+    assert '"ph": [["2026-10-01", 7.0]' in code.replace("\\", "")

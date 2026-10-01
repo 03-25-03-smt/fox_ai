@@ -162,13 +162,28 @@ CREATE TABLE IF NOT EXISTS lang_log (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Аквариум: задачи ухода (одна запись на задачу в день). Время — ISO с часовым поясом,
--- как в старом fish_helper, чтобы его базу можно было импортировать как есть.
+-- Аквариумы владельца. Время задач — ISO с часовым поясом.
+CREATE TABLE IF NOT EXISTS aq_tanks (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name   TEXT NOT NULL,
+    volume REAL NOT NULL
+);
+-- График ухода: что, в каком аквариуме, во сколько и по каким дням (0 = пн)
+CREATE TABLE IF NOT EXISTS aq_plan (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    tank_id INTEGER NOT NULL REFERENCES aq_tanks(id) ON DELETE CASCADE,
+    title   TEXT NOT NULL,
+    kind    TEXT NOT NULL DEFAULT 'other',
+    time    TEXT NOT NULL,
+    days    TEXT NOT NULL
+);
+-- Задачи по дням (task_id = «s<id пункта графика>» или тестовая)
 CREATE TABLE IF NOT EXISTS aq_tasks (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     date              TEXT NOT NULL,
     task_id           TEXT NOT NULL,
     task_name         TEXT NOT NULL,
+    tank_id           INTEGER,
     sent_at           TEXT NOT NULL,
     remind_at         TEXT,
     overdue_at        TEXT,
@@ -184,31 +199,33 @@ CREATE TABLE IF NOT EXISTS aq_tasks (
     UNIQUE (date, task_id)
 );
 CREATE TABLE IF NOT EXISTS aq_settings (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS aq_schedule (task_id TEXT PRIMARY KEY, time TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS aq_achievements (streak INTEGER PRIMARY KEY, achieved_at TEXT NOT NULL);
 
--- Что агент знает об аквариуме: накапливается из ответов на его вопросы и разговоров
+-- Что агент знает об аквариумах (tank_id NULL — общее для всех)
 CREATE TABLE IF NOT EXISTS aq_facts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tank_id    INTEGER,
     topic      TEXT NOT NULL,
     text       TEXT NOT NULL,
     source     TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS aq_questions (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id  INTEGER NOT NULL,
-    topic    TEXT NOT NULL,
-    question TEXT NOT NULL,
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    tank_id   INTEGER,
+    topic     TEXT NOT NULL,
+    question  TEXT NOT NULL,
     tg_msg_id INTEGER,
-    answered INTEGER NOT NULL DEFAULT 0,  -- 1 ответил, -1 «не знаю» / пропустил
-    asked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    answered  INTEGER NOT NULL DEFAULT 0,  -- 1 ответил, -1 «не знаю» / пропустил
+    asked_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS aq_water (
-    id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    at    TEXT NOT NULL DEFAULT (datetime('now')),
-    param TEXT NOT NULL,
-    value REAL NOT NULL
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    tank_id INTEGER,
+    at      TEXT NOT NULL DEFAULT (datetime('now')),
+    param   TEXT NOT NULL,
+    value   REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS allowed_chats (
@@ -228,6 +245,12 @@ MIGRATIONS = [
     ("users", "tz", "TEXT"),
     ("users", "intra_login", "TEXT"),
     ("users", "intra_notified", "TEXT"),
+    # аквариумы: первая версия была с одним аквариумом
+    ("aq_tasks", "tank_id", "INTEGER"),
+    ("aq_facts", "tank_id", "INTEGER"),
+    ("aq_questions", "tank_id", "INTEGER"),
+    ("aq_questions", "tg_msg_id", "INTEGER"),
+    ("aq_water", "tank_id", "INTEGER"),
 ]
 
 USER_FIELDS = (
