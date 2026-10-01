@@ -45,7 +45,7 @@ def to_markdown(messages: list[ExportMessage], title: str, tz: datetime.tzinfo) 
         if when.date() != day:
             day = when.date()
             lines += [f"## {day:%d.%m.%Y}", ""]
-        who = "🧑 Я" if m.role == "user" else f"🦊 Fox AI{f' ({m.model})' if m.model else ''}"
+        who = "🧑 Я" if m.role == "user" else f"🐰 Fox AI{f' ({m.model})' if m.model else ''}"
         lines += [f"**{who}** · {when:%H:%M}", "", m.content.strip(), ""]
     return "\n".join(lines).rstrip() + "\n"
 

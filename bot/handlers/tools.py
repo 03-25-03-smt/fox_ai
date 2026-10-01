@@ -315,7 +315,7 @@ async def _generate_image(app: App, prompt: str) -> bytes:
 async def cmd_draw(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
     prompt = (command.args or "").strip()
     if not prompt:
-        await message.answer("🎨 Использование: /draw рыжая лиса программирует ночью, неон, киберпанк")
+        await message.answer("🎨 Использование: /draw белый кролик программирует ночью, неон, киберпанк")
         return
     if app.imagegen is None:
         await message.answer("🎨 Генерация картинок выключена (не задан IMAGEGEN_URL).")

@@ -158,14 +158,14 @@ async def respond(
 
         waiting = app.queue.waiting + (1 if app.queue.busy else 0)
         placeholder = await target.answer(
-            f"⏳ В очереди, передо мной {waiting}…" if app.queue.busy else "🦊 думаю…"
+            f"⏳ В очереди, передо мной {waiting}…" if app.queue.busy else "🐰 думаю…"
         )
         answer, status = "", ""
         started = time.monotonic()
         try:
             async with app.queue.slot():
                 if waiting:
-                    await safe_edit(placeholder, "🦊 думаю…")
+                    await safe_edit(placeholder, "🐰 думаю…")
                 last_edit = time.monotonic()
                 async for event in assistant.run(
                     model, messages, turn=turn, allow_tools=allow_tools,

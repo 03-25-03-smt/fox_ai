@@ -157,12 +157,12 @@ async def test_photo_without_vision_model(env):
 
 
 async def test_draw(env):
-    env.llm.chat_reply = "a red fox coding at night"
-    await env.send(FRIEND, "/draw рыжая лиса программирует ночью")
-    assert env.images.prompts == ["a red fox coding at night"]
+    env.llm.chat_reply = "a white rabbit coding at night"
+    await env.send(FRIEND, "/draw белый кролик программирует ночью")
+    assert env.images.prompts == ["a white rabbit coding at night"]
     assert env.llm.unloaded == ["*"] and env.images.unloads == 1  # одна 3070: VRAM освобождается
     photo = env.session.of_type(SendPhoto)[-1]
-    assert "рыжая лиса" in photo.caption
+    assert "белый кролик" in photo.caption
 
 
 # ---------------------------------------------------------------- кнопки под ответом

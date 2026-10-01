@@ -12,7 +12,7 @@ from .conftest import ADMIN
 
 PARIS = zoneinfo.ZoneInfo("Europe/Paris")
 MSGS = [
-    ExportMessage("user", "Привет! Что такое указатель? 🦊", "2026-10-01 08:00:00"),
+    ExportMessage("user", "Привет! Что такое указатель? 🐰", "2026-10-01 08:00:00"),
     ExportMessage("assistant", "Это адрес.\n```c\nint *p = &x;\n```\n**Важно**: не NULL.", "2026-10-01 08:00:05",
                   "qwen2.5:7b"),
     ExportMessage("user", "Спасибо", "2026-10-02 09:30:00"),
@@ -23,7 +23,7 @@ def test_markdown():
     md = to_markdown(MSGS, "Диалог", PARIS)
     assert md.startswith("# Диалог")
     assert "## 01.10.2026" in md and "## 02.10.2026" in md
-    assert "**🦊 Fox AI (qwen2.5:7b)** · 10:00" in md  # UTC+2 летом
+    assert "**🐰 Fox AI (qwen2.5:7b)** · 10:00" in md  # UTC+2 летом
     assert "int *p = &x;" in md
 
 

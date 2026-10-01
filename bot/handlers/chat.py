@@ -45,7 +45,7 @@ VISION_DEFAULT_PROMPT = "Опиши, что на изображении, и от
 async def on_text(message: Message, app: App, turn: Turn) -> None:
     text = strip_mention(message.text, app.bot_username) if turn.is_group else message.text
     if not text:
-        await message.answer("Слушаю 🦊")
+        await message.answer("Слушаю 🐰")
         return
     if app.settings.auto_summary and (url := only_link(text)):
         # Прислали просто ссылку — пересказываем; короткая приписка становится вопросом
