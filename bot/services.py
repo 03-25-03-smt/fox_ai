@@ -115,13 +115,15 @@ class SpeechClient(_Client):
     def __init__(self, base_url: str) -> None:
         super().__init__(base_url, timeout=180.0)
 
-    async def transcribe(self, audio: bytes, filename: str = "voice.ogg") -> str:
-        resp = await self._request("POST", "/stt", files={"file": (filename, audio)})
+    async def transcribe(self, audio: bytes, filename: str = "voice.ogg", language: str | None = None) -> str:
+        """language — код языка речи (de, cs…), если известен; иначе Whisper определит сам."""
+        params = {"language": language} if language else None
+        resp = await self._request("POST", "/stt", files={"file": (filename, audio)}, params=params)
         return str(resp.json().get("text", "")).strip()
 
-    async def synthesize(self, text: str) -> bytes:
-        """Возвращает OGG/Opus — формат голосовых сообщений Telegram."""
-        resp = await self._request("POST", "/tts", json={"text": text})
+    async def synthesize(self, text: str, lang: str = "ru") -> bytes:
+        """Возвращает OGG/Opus — формат голосовых сообщений Telegram. lang: ru, de, cs."""
+        resp = await self._request("POST", "/tts", json={"text": text, "lang": lang})
         return resp.content
 
 

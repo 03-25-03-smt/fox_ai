@@ -119,12 +119,16 @@ class FakeSpeech:
     def __init__(self, text: str = "напомни через 10 минут выключить плиту") -> None:
         self.text = text
         self.synthesized: list[str] = []
+        self.languages: list[str | None] = []  # язык каждого запроса transcribe
+        self.voices: list[str] = []  # язык каждого запроса synthesize
 
-    async def transcribe(self, audio: bytes, filename: str = "voice.ogg") -> str:
+    async def transcribe(self, audio: bytes, filename: str = "voice.ogg", language: str | None = None) -> str:
+        self.languages.append(language)
         return self.text
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(self, text: str, lang: str = "ru") -> bytes:
         self.synthesized.append(text)
+        self.voices.append(lang)
         return b"OggS-fake"
 
     async def health(self) -> bool:

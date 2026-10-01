@@ -1,0 +1,619 @@
+"""Учитель языков: /w /dict /quiz /lesson /test /talk /speak /lang.
+
+Доступно пользователям из LANG_USER_IDS (по умолчанию — админам): словарь личный.
+"""
+
+import datetime
+import html
+import logging
+
+from aiogram import Bot, F
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+
+from ..app import App
+from ..assistant import Turn
+from ..lang import (
+    LANGS,
+    LEVELS,
+    LangStore,
+    Pending,
+    QuizSession,
+    Word,
+    compare_speech,
+    first_letter,
+    lookup_messages,
+    parse_lang,
+    parse_lookup,
+    parse_phrase,
+    phrase_messages,
+    split_lang_arg,
+)
+from ..llm import LLMError
+from ..services import ServiceError
+from .common import respond, with_user
+from .registry import Routes
+
+log = logging.getLogger(__name__)
+router = Routes("lang")
+
+CB_WORD = "lw:"  # lw:<действие>:<id слова>
+CB_QUIZ = "lq:"  # lq:a:<вариант> · lq:stop · lq:daily
+CB_SPEAK = "ls:"  # ls:next:<язык> · ls:stop
+QUIZ_DEFAULT = 10
+QUIZ_MAX = 30
+DICT_CHUNK = 3500
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+# ---------------------------------------------------------------- общее
+
+
+def lang_allowed(app: App, turn: Turn) -> bool:
+    return turn.registered and turn.user_id in app.settings.lang_users
+
+
+async def need_lang(message: Message, app: App, turn: Turn) -> bool:
+    if lang_allowed(app, turn):
+        return True
+    await message.answer("🔒 Учитель языков доступен только владельцу бота.")
+    return False
+
+
+def _store(app: App) -> LangStore:
+    return app.assistant.lang
+
+
+def _today(app: App, turn: Turn) -> str:
+    return datetime.datetime.now(app.assistant.tz(turn.user)).date().isoformat()
+
+
+def _e(text: str) -> str:
+    return html.escape(text)
+
+
+def word_card(word: Word, *, note: str = "") -> str:
+    lang = LANGS[word.lang]
+    lines = [f"{lang.flag} <b>{_e(word.word)}</b> — {_e(word.translation)}"]
+    meta = " · ".join(x for x in (word.pos, word.grammar) if x)
+    if meta:
+        lines.append(f"<i>{_e(meta)}</i>")
+    if word.examples:
+        lines.append("")
+        for i, ex in enumerate(word.examples, 1):
+            ru = f" — <i>{_e(ex['ru'])}</i>" if ex.get("ru") else ""
+            lines.append(f"{i}. {_e(ex['text'])}{ru}")
+    if word.tip:
+        lines += ["", f"💡 {_e(word.tip)}"]
+    if note:
+        lines += ["", note]
+    return "\n".join(lines)
+
+
+def word_keyboard(app: App, word: Word) -> InlineKeyboardMarkup:
+    row = []
+    if app.speech is not None:
+        row.append(InlineKeyboardButton(text="🔊", callback_data=f"{CB_WORD}tts:{word.id}"))
+    row += [
+        InlineKeyboardButton(text="✍️ Своё предложение", callback_data=f"{CB_WORD}sent:{word.id}"),
+        InlineKeyboardButton(text="🗑", callback_data=f"{CB_WORD}del:{word.id}"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
+def speech_text(word: Word) -> str:
+    """Что прочитать вслух: слово и примеры."""
+    return ". ".join([word.word, *(ex["text"] for ex in word.examples)])
+
+
+async def send_tts(app: App, target: Message, text: str, lang: str) -> None:
+    if app.speech is None:
+        return
+    try:
+        audio = await app.speech.synthesize(text, lang=lang)
+    except ServiceError as exc:
+        log.warning("tts %s failed: %s", lang, exc)
+        return
+    await target.answer_voice(BufferedInputFile(audio, f"{lang}.ogg"))
+
+
+async def _ask_model(app: App, messages: list[dict[str, str]]) -> str:
+    async with app.queue.slot():
+        return await app.llm.chat(app.settings.tutor_model, messages, json_mode=True,
+                                  options={"temperature": 0.3})
+
+
+# ---------------------------------------------------------------- словарь
+
+
+@router.message(Command("w", "word"))
+async def cmd_word(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    forced, query = split_lang_arg(command.args)
+    if not query:
+        await message.answer(
+            "📖 Использование:\n/w Hund — перевод и в словарь\n/w cs pes — явно чешский\n"
+            "/w de собака — с русского на немецкий\n\nСловарь: /dict · повторение: /quiz"
+        )
+        return
+    if len(query) > 80:
+        await message.answer("Это слишком длинно для словаря — пришли слово или короткое выражение.")
+        return
+    store = _store(app)
+    state = await store.get_state(turn.user_id)
+    hint = forced or state.current
+    today = _today(app, turn)
+
+    existing = await store.find_word(turn.user_id, hint, query)
+    if existing:
+        await message.answer(word_card(existing, note="📚 Уже есть в словаре."), parse_mode=ParseMode.HTML,
+                             reply_markup=word_keyboard(app, existing))
+        await send_tts(app, message, speech_text(existing), existing.lang)
+        return
+
+    status = await message.answer("🔎 Ищу…")
+    level = await store.get_level(turn.user_id, hint)
+    try:
+        raw = await _ask_model(app, lookup_messages(query, hint, forced is not None, level))
+        entry = parse_lookup(raw, hint, forced is not None)
+    except LLMError as exc:
+        await status.edit_text(f"⚠️ Не получилось перевести: {exc}")
+        return
+    word, created = await store.add_word(turn.user_id, entry, today)
+    await app.count_usage(turn.user_id)
+    total = (await store.counts(turn.user_id, today)).get(word.lang, (0, 0))[0]
+    note = (f"📚 Сохранил в словарь ({LANGS[word.lang].name}: {total} сл.). Повторим завтра."
+            if created else "📚 Уже есть в словаре.")
+    await status.edit_text(word_card(word, note=note), parse_mode=ParseMode.HTML,
+                           reply_markup=word_keyboard(app, word))
+    await send_tts(app, message, speech_text(word), word.lang)
+
+
+@router.message(Command("dict"))
+async def cmd_dict(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    store = _store(app)
+    forced, rest = split_lang_arg(command.args)
+    lang = forced or (await store.get_state(turn.user_id)).current
+    letter = rest.strip().upper()
+    words = await store.list_words(turn.user_id, lang)
+    if not words:
+        await message.answer(f"{LANGS[lang].flag} Словарь пуст. Добавь слово: /w Hund")
+        return
+    if letter:
+        words = [w for w in words if first_letter(lang, w.word) == letter]
+        if not words:
+            await message.answer(f"На букву {_e(letter)} слов нет.")
+            return
+
+    lines = [f"{LANGS[lang].flag} <b>Словарь: {LANGS[lang].name}</b> ({len(words)} сл.)"]
+    current = None
+    for w in words:
+        head = first_letter(lang, w.word)
+        if head != current:
+            current = head
+            lines.append(f"\n<b>{_e(head)}</b>")
+        mark = " ⚠️" if w.wrong > w.correct else ""
+        lines.append(f"<code>{w.id}</code> {_e(w.word)} — {_e(w.translation)}{mark}")
+    lines.append("\nКарточка: /w слово · удалить: /wdel номер · буква: /dict de H")
+
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) > DICT_CHUNK:
+            await message.answer(chunk, parse_mode=ParseMode.HTML)
+            chunk = ""
+        chunk += line + "\n"
+    await message.answer(chunk, parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("wdel"))
+async def cmd_wdel(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer("Использование: /wdel <номер из /dict>")
+        return
+    ok = await _store(app).delete_word(turn.user_id, int(arg))
+    await message.answer("🗑 Удалил из словаря" if ok else "Нет такого слова, см. /dict")
+
+
+@router.callback_query(F.data.startswith(CB_WORD))
+async def on_word_button(callback: CallbackQuery, app: App, turn: Turn) -> None:
+    if not lang_allowed(app, turn) or not isinstance(callback.message, Message):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    _, action, raw_id = callback.data.split(":", 2)
+    store = _store(app)
+    word = await store.get_word(turn.user_id, int(raw_id)) if raw_id.isdigit() else None
+    if word is None:
+        await callback.answer("Этого слова уже нет в словаре", show_alert=True)
+        return
+    if action == "tts":
+        await callback.answer("Озвучиваю…")
+        await send_tts(app, callback.message, speech_text(word), word.lang)
+    elif action == "sent":
+        store.pending[turn.user_id] = Pending("sentence", word.lang, word.word, word.id)
+        await callback.answer()
+        await callback.message.answer(
+            f"✍️ Напиши своё предложение со словом <b>{_e(word.word)}</b> — я проверю и поправлю.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif action == "del":
+        await store.delete_word(turn.user_id, word.id)
+        await callback.answer("Удалено")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(f"🗑 {_e(word.word)} удалено из словаря.")
+    else:
+        await callback.answer()
+
+
+async def _has_pending(message: Message, app: App, kind: str) -> bool:
+    user = message.from_user
+    pending = app.assistant.lang.pending.get(user.id) if user else None
+    return pending is not None and pending.kind == kind
+
+
+async def pending_sentence(message: Message, app: App) -> bool:
+    return await _has_pending(message, app, "sentence")
+
+
+async def pending_speak(message: Message, app: App) -> bool:
+    return await _has_pending(message, app, "speak")
+
+
+@router.message(F.text & ~F.text.startswith("/"), pending_sentence)
+async def on_sentence(message: Message, app: App, turn: Turn) -> None:
+    pending = _store(app).pending.pop(turn.user_id)
+    lang = LANGS[pending.lang]
+    await _store(app).set_current(turn.user_id, pending.lang)
+    prompt = (
+        f"Я тренирую слово «{pending.text}» ({lang.name}). Моё предложение: {message.text}\n"
+        "Проверь его: исправленный вариант, коротко по-русски объясни каждую ошибку, оцени, "
+        "звучит ли естественно, и предложи 1–2 более удачных варианта с этим словом."
+    )
+    await respond(message, app, with_user(turn, mode="lang"), prompt, extract_memory=False,
+                  allow_tools=False)
+
+
+# ---------------------------------------------------------------- тест по словарю
+
+
+def _quiz_keyboard(session: QuizSession) -> InlineKeyboardMarkup:
+    item = session.current
+    rows = [[InlineKeyboardButton(text=opt[:60], callback_data=f"{CB_QUIZ}a:{i}")]
+            for i, opt in enumerate(item.options)]
+    if item.kind == "self":
+        rows = [[InlineKeyboardButton(text=opt, callback_data=f"{CB_QUIZ}a:{i}")
+                 for i, opt in enumerate(item.options)]]
+    rows.append([InlineKeyboardButton(text="⏹ Закончить", callback_data=f"{CB_QUIZ}stop")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_question(target: Message, app: App, user_id: int) -> None:
+    store = _store(app)
+    item = await store.next_question(user_id)
+    session = store.quizzes[user_id]
+    if item is None:
+        return
+    head = f"❓ {session.index + 1}/{len(session.words)}\n\n"
+    await target.answer(head + item.question, parse_mode=ParseMode.HTML,
+                        reply_markup=_quiz_keyboard(session))
+
+
+async def start_quiz(target: Message, app: App, turn: Turn, words: list[Word], *, daily: bool) -> None:
+    if not words:
+        await target.answer("📚 В словаре пока нет слов. Добавь: /w Hund")
+        return
+    await _store(app).start_quiz(turn.user_id, words, daily=daily)
+    await target.answer(f"📝 Повторяем {len(words)} сл. Поехали!")
+    await send_question(target, app, turn.user_id)
+
+
+async def finish_quiz(target: Message, app: App, turn: Turn) -> None:
+    store = _store(app)
+    session = store.quizzes.pop(turn.user_id, None)
+    if session is None:
+        return
+    answered = session.correct + len(session.wrong)
+    if not answered:
+        await target.answer("⏹ Тест остановлен.")
+        return
+    streak = await store.finish_review(turn.user_id, _today(app, turn))
+    lines = [f"🏁 Итог: {session.correct}/{answered} верно", f"🔥 Серия: {streak} дн. подряд"]
+    if session.wrong:
+        lines += ["", "Повторим завтра:"]
+        lines += [f"• {_e(w.word)} — {_e(w.translation)}" for w in session.wrong]
+    lines += ["", "Ещё: /quiz · фраза вслух: /speak · новая тема: /lesson"]
+    await target.answer("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("quiz"))
+async def cmd_quiz(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    lang, rest = split_lang_arg(command.args)
+    count = int(rest) if rest.isdigit() else QUIZ_DEFAULT
+    count = max(1, min(count, QUIZ_MAX))
+    words = await _store(app).review_words(turn.user_id, _today(app, turn), count, lang)
+    await start_quiz(message, app, turn, words, daily=False)
+
+
+@router.callback_query(F.data.startswith(CB_QUIZ))
+async def on_quiz_button(callback: CallbackQuery, app: App, turn: Turn) -> None:
+    msg = callback.message
+    if not lang_allowed(app, turn) or not isinstance(msg, Message):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    store = _store(app)
+    action = callback.data.removeprefix(CB_QUIZ)
+
+    if action == "daily":
+        await callback.answer()
+        await msg.edit_reply_markup(reply_markup=None)
+        state = await store.get_state(turn.user_id)
+        words = await store.words_by_ids(turn.user_id, state.plan_words)
+        await start_quiz(msg, app, turn, words, daily=True)
+        return
+
+    if action == "stop":
+        await callback.answer()
+        await msg.edit_reply_markup(reply_markup=None)
+        await finish_quiz(msg, app, turn)
+        return
+
+    session = store.quizzes.get(turn.user_id)
+    choice = action.removeprefix("a:")
+    if session is None or session.current is None or not choice.isdigit():
+        await callback.answer("Этот тест уже закончился. /quiz — новый", show_alert=True)
+        return
+    item = session.current
+    session.current = None  # повторное нажатие той же кнопки не засчитываем
+    correct = int(choice) == item.answer
+    if item.kind == "self":
+        correct = int(choice) == 0
+    days = await store.record_answer(turn.user_id, item.word, correct, _today(app, turn))
+    session.index += 1
+    if correct:
+        session.correct += 1
+        verdict = "✅ Верно!"
+    else:
+        session.wrong.append(item.word)
+        verdict = f"❌ Правильно: <b>{_e(item.options[item.answer])}</b>" if item.kind != "self" else "❌ Повторим"
+    await callback.answer("✅" if correct else "❌")
+
+    w = item.word
+    example = f"\n{_e(w.examples[0]['text'])} — <i>{_e(w.examples[0].get('ru', ''))}</i>" if w.examples else ""
+    reveal = (f"{item.question}\n\n{verdict}\n{LANGS[w.lang].flag} {_e(w.word)} — {_e(w.translation)}"
+              f"{example}\n<i>Следующий повтор через {days} дн.</i>")
+    tts = (InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="🔊", callback_data=f"{CB_WORD}tts:{w.id}")]]) if app.speech else None)
+    await msg.edit_text(reveal, parse_mode=ParseMode.HTML, reply_markup=tts)
+
+    if session.finished:
+        await finish_quiz(msg, app, turn)
+    else:
+        await send_question(msg, app, turn.user_id)
+
+
+# ---------------------------------------------------------------- уроки, тесты, разговор
+
+
+LESSON_PROMPTS = {
+    "lesson": (
+        "Проведи мне урок ({lang}, мой уровень {level}){topic}. Объясни на русском понятно и с "
+        "примерами {lang_in} с переводом, таблица — если уместно. В конце дай 3 коротких упражнения "
+        "и жди моих ответов."
+    ),
+    "test": (
+        "Дай мне тест ({lang}, уровень {level}){topic}: 6 пронумерованных заданий разных типов "
+        "(перевод в обе стороны, вставь пропущенное слово, выбери правильную форму, "
+        "{grammar_hint}). Используй слова из моего словаря. Ответы не показывай — я пришлю свои, "
+        "потом проверь каждый и поставь оценку."
+    ),
+    "talk": (
+        "Давай поговорим {lang_in}{topic}. Пиши короткие реплики уровня {level} и в конце каждой — "
+        "вопрос мне. После каждой моей реплики сначала коротко по-русски исправь мои ошибки, "
+        "потом продолжай разговор. Начни первым."
+    ),
+}
+DEFAULT_TOPICS = {
+    "lesson": ": выбери сам следующую полезную тему для моего уровня, учитывая пройденные уроки",
+    "test": " по словам и грамматике, которые я недавно учил",
+    "talk": " на бытовую тему на твой выбор",
+}
+GRAMMAR_HINTS = {"de": "артикль и падеж", "cs": "падеж и вид глагола"}
+
+
+async def _start_lesson(message: Message, command: CommandObject, app: App, turn: Turn, kind: str) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    store = _store(app)
+    forced, topic = split_lang_arg(command.args)
+    lang_code = forced or (await store.get_state(turn.user_id)).current
+    lang = LANGS[lang_code]
+    level = await store.get_level(turn.user_id, lang_code)
+    await store.set_current(turn.user_id, lang_code)
+    await app.db.set_mode(turn.user_id, "lang")
+    await store.log_lesson(turn.user_id, lang_code, kind, topic or "на выбор")
+    prompt = LESSON_PROMPTS[kind].format(
+        lang=lang.name, lang_in=lang.name_in, level=level,
+        topic=f" на тему «{topic}»" if topic else DEFAULT_TOPICS[kind],
+        grammar_hint=GRAMMAR_HINTS[lang_code],
+    )
+    await message.answer(f"{lang.flag} Режим «Учитель языков» включён. Вернуться к обычному чату: /mode")
+    await respond(message, app, with_user(turn, mode="lang"), prompt,
+                  store_text=f"/{kind} {lang_code} {topic}".strip(), extract_memory=False)
+
+
+@router.message(Command("lesson"))
+async def cmd_lesson(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    await _start_lesson(message, command, app, turn, "lesson")
+
+
+@router.message(Command("test"))
+async def cmd_test(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    await _start_lesson(message, command, app, turn, "test")
+
+
+@router.message(Command("talk"))
+async def cmd_talk(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    await _start_lesson(message, command, app, turn, "talk")
+
+
+# ---------------------------------------------------------------- произношение
+
+
+def _speak_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="➡️ Другая фраза", callback_data=f"{CB_SPEAK}next:{lang}"),
+        InlineKeyboardButton(text="✖️ Хватит", callback_data=f"{CB_SPEAK}stop"),
+    ]])
+
+
+async def offer_phrase(target: Message, app: App, turn: Turn, lang: str) -> None:
+    store = _store(app)
+    words = await store.review_words(turn.user_id, _today(app, turn), 5, lang)
+    examples = [(ex["text"], ex.get("ru", ""), w.id) for w in words for ex in w.examples]
+    if examples:
+        text, ru, word_id = store.rng.choice(examples)
+    else:
+        level = await store.get_level(turn.user_id, lang)
+        try:
+            text, ru = parse_phrase(await _ask_model(app, phrase_messages(lang, level, [w.word for w in words])))
+        except LLMError as exc:
+            await target.answer(f"⚠️ Не получилось придумать фразу: {exc}")
+            return
+        word_id = None
+    store.pending[turn.user_id] = Pending("speak", lang, text, word_id)
+    translation = f"\n<i>{_e(ru)}</i>" if ru else ""
+    await target.answer(
+        f"🗣 {LANGS[lang].flag} Послушай и прочитай вслух — пришли голосовое:\n\n<b>{_e(text)}</b>{translation}",
+        parse_mode=ParseMode.HTML, reply_markup=_speak_keyboard(lang),
+    )
+    await send_tts(app, target, text, lang)
+
+
+@router.message(Command("speak"))
+async def cmd_speak(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    if app.speech is None:
+        await message.answer("🎤 Сервис речи выключен (не задан SPEECH_URL).")
+        return
+    lang = parse_lang(command.args) or (await _store(app).get_state(turn.user_id)).current
+    await offer_phrase(message, app, turn, lang)
+
+
+@router.message(F.voice | F.audio, pending_speak)
+async def on_speak_voice(message: Message, bot: Bot, app: App, turn: Turn) -> None:
+    pending = _store(app).pending[turn.user_id]
+    media = message.voice or message.audio
+    if (media.file_size or 0) > MAX_VOICE_BYTES:
+        await message.answer("Голосовое слишком большое.")
+        return
+    status = await message.answer("🎧 Слушаю…")
+    data = (await bot.download(media)).read()
+    try:
+        heard = await app.speech.transcribe(data, "voice.ogg", language=pending.lang)
+    except ServiceError as exc:
+        await status.edit_text(f"⚠️ {exc}")
+        return
+    check = compare_speech(pending.text, heard)
+    if check.score >= 90:
+        verdict = "🎉 Отлично, всё понятно!"
+    elif check.score >= 60:
+        verdict = "👍 Хорошо, но есть что подтянуть."
+    else:
+        verdict = "🔁 Пока непохоже — послушай пример ещё раз и попробуй медленнее."
+    lines = [f"🎧 Я услышал: <i>{_e(heard) or '—'}</i>", f"Совпадение: <b>{check.score}%</b> — {verdict}"]
+    if check.missed:
+        lines.append("Не расслышал: " + ", ".join(f"<b>{_e(w)}</b>" for w in check.missed))
+    lines.append("\nМожно прислать ещё раз или взять другую фразу.")
+    await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=_speak_keyboard(pending.lang))
+
+
+@router.callback_query(F.data.startswith(CB_SPEAK))
+async def on_speak_button(callback: CallbackQuery, app: App, turn: Turn) -> None:
+    msg = callback.message
+    if not lang_allowed(app, turn) or not isinstance(msg, Message):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    action = callback.data.removeprefix(CB_SPEAK)
+    await callback.answer()
+    await msg.edit_reply_markup(reply_markup=None)
+    if action == "stop":
+        _store(app).pending.pop(turn.user_id, None)
+        await msg.answer("👌 Закончили с произношением.")
+    elif action.startswith("next:") and (lang := action.removeprefix("next:")) in LANGS:
+        await offer_phrase(msg, app, turn, lang)
+
+
+# ---------------------------------------------------------------- настройки
+
+
+@router.message(Command("lang"))
+async def cmd_lang(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    store = _store(app)
+    args = (command.args or "").split()
+    if args and args[0].lower() == "daily" and len(args) == 2 and args[1].lower() in ("on", "off"):
+        await store.set_daily(turn.user_id, args[1].lower() == "on")
+        await message.answer("🔔 Ежедневное повторение включено" if args[1].lower() == "on"
+                             else "🔕 Ежедневное повторение выключено")
+        return
+    if args:
+        lang = parse_lang(args[0])
+        level = args[1].upper() if len(args) > 1 else None
+        if lang is None or (level and level not in LEVELS):
+            await message.answer("Использование: /lang de · /lang cs A1 · /lang daily on|off\n"
+                                 f"Уровни: {', '.join(LEVELS)}")
+            return
+        await store.set_current(turn.user_id, lang)
+        if level:
+            await store.set_level(turn.user_id, lang, level)
+        level = level or await store.get_level(turn.user_id, lang)
+        await message.answer(f"{LANGS[lang].flag} Сейчас учим: {LANGS[lang].name}, уровень {level}")
+        return
+
+    state = await store.get_state(turn.user_id)
+    today = _today(app, turn)
+    counts = await store.counts(turn.user_id, today)
+    lines = ["🎓 <b>Учитель языков</b>", ""]
+    for code, lang in LANGS.items():
+        total, due = counts.get(code, (0, 0))
+        mark = " ← сейчас" if code == state.current else ""
+        level = await store.get_level(turn.user_id, code)
+        lines.append(f"{lang.flag} {lang.name}: уровень {level}, слов {total}, к повторению {due}{mark}")
+    lines.append(f"\n🔥 Серия: {state.streak} дн.")
+    if state.daily:
+        s = app.settings
+        when = "уже было" if state.plan_sent and state.plan_day == today else (
+            state.plan_at.astimezone(app.assistant.tz(turn.user)).strftime("%H:%M")
+            if state.plan_at and state.plan_day == today else "будет назначено")
+        lines.append(f"🔔 Повторение каждый день в случайное время {s.lang_daily_from}:00–"
+                     f"{s.lang_daily_to}:00, {s.lang_daily_min}–{s.lang_daily_max} слов "
+                     f"(сегодня: {when})")
+    else:
+        lines.append("🔕 Ежедневное повторение выключено (/lang daily on)")
+    lines += [
+        "", "<b>Команды</b>",
+        "/w слово — перевод, примеры, озвучка → в словарь",
+        "/dict [de|cs] [буква] — словарь по алфавиту · /wdel номер",
+        "/quiz [de|cs] [N] — тест по своим словам",
+        "/lesson [de|cs] [тема] — урок · /test — тест по грамматике",
+        "/talk [de|cs] [тема] — разговорная практика",
+        "/speak [de|cs] — произношение (голосовым)",
+        "/lang de B1 — язык и уровень · /lang daily on|off",
+    ]
+    await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)

@@ -1,4 +1,5 @@
-"""Фоновые задачи: напоминания, алерт температуры GPU, blackhole из интры, бэкапы."""
+"""Фоновые задачи: напоминания, алерт температуры GPU, blackhole из интры, бэкапы,
+ежедневное повторение слов."""
 
 import asyncio
 import datetime
@@ -8,11 +9,13 @@ import time
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .app import App
 from .backup import backup_database
 from .gpu import query_gpus
 from .intra import IntraError
+from .lang import LANGS
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +24,8 @@ GPU_INTERVAL = 60
 GPU_ALERT_COOLDOWN = 30 * 60
 SCHEDULE_INTERVAL = 300
 BLACKHOLE_WARN_DAYS = (30, 14, 7, 3, 2, 1, 0)
+LANG_INTERVAL = 60
+LANG_LATEST_HOUR = 21  # если бот был выключен в назначенное время — позже 21:00 не будим
 
 
 async def _loop(name: str, interval: float, step) -> None:
@@ -110,6 +115,53 @@ async def check_blackholes(bot: Bot, app: App, now: datetime.datetime | None = N
     return sent
 
 
+# ---------------------------------------------------------------- повторение слов
+
+
+async def send_daily_reviews(bot: Bot, app: App, now: datetime.datetime | None = None) -> int:
+    """Раз в день в случайное время окна LANG_DAILY_FROM..TO присылает 5–15 слов на повторение."""
+    s, store = app.settings, app.assistant.lang
+    now = now or datetime.datetime.now(datetime.UTC)
+    sent = 0
+    for user_id in sorted(s.lang_users):
+        user = await app.db.get_user(user_id)
+        if user is None:
+            continue
+        state = await store.get_state(user_id)
+        if not state.daily:
+            continue
+        tz = app.assistant.tz(user)
+        local = now.astimezone(tz)
+        day = local.date().isoformat()
+        if state.plan_day != day:
+            at = store.plan_time(local.date(), tz, s.lang_daily_from, s.lang_daily_to)
+            count = store.rng.randint(s.lang_daily_min, max(s.lang_daily_min, s.lang_daily_max))
+            await store.save_plan(user_id, day, at, count)
+            state = await store.get_state(user_id)
+        if state.plan_sent or state.plan_at is None or now < state.plan_at:
+            continue
+        words = await store.review_words(user_id, day, state.plan_count)
+        await store.mark_plan_sent(user_id, [w.id for w in words])
+        if local.hour >= LANG_LATEST_HOUR:
+            continue
+        if words:
+            per_lang = {code: sum(w.lang == code for w in words) for code in LANGS}
+            split = " · ".join(f"{LANGS[c].flag} {n}" for c, n in per_lang.items() if n)
+            text = f"📚 Время повторить слова! Сегодня {len(words)}: {split}"
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="▶️ Начать", callback_data="lq:daily")]])
+        else:
+            text, markup = "📚 Пора учить слова, но словарь пока пуст. Добавь первое: /w Hund", None
+        if state.streak:
+            text += f"\n🔥 Серия: {state.streak} дн. — не прерывай!"
+        try:
+            await bot.send_message(user_id, text, reply_markup=markup)
+            sent += 1
+        except TelegramAPIError as exc:
+            log.warning("daily review for %s not delivered: %s", user_id, exc)
+    return sent
+
+
 # ---------------------------------------------------------------- запуск
 
 
@@ -136,4 +188,8 @@ def start_background(bot: Bot, app: App) -> None:
 
     app.spawn(_loop("reminders", REMINDER_INTERVAL, reminders_step))
     app.spawn(_loop("gpu", GPU_INTERVAL, gpu_step))
+    async def lang_step() -> None:
+        await send_daily_reviews(bot, app)
+
     app.spawn(_loop("schedule", SCHEDULE_INTERVAL, schedule_step))
+    app.spawn(_loop("lang", LANG_INTERVAL, lang_step))

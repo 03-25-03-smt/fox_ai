@@ -14,8 +14,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # CUDA-библиотеки для ctranslate2 (faster-whisper) ставятся pip-пакетами
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
 
-# Русский голос Piper (~60 МБ) скачиваем при сборке
-RUN python -m piper.download_voices --download-dir /opt/voices ru_RU-irina-medium
+# Голоса Piper (~60 МБ каждый) скачиваем при сборке: русский — ответы бота,
+# немецкий и чешский — произношение в учителе языков
+RUN python -m piper.download_voices --download-dir /opt/voices \
+    ru_RU-irina-medium de_DE-thorsten-medium cs_CZ-jirka-medium
 
 COPY app.py .
 RUN useradd --create-home --uid 1000 speech && mkdir -p /models && chown speech /models

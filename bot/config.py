@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     # Одна видеокарта: на время /draw выгружать LLM из VRAM и не пускать другие генерации
     imagegen_exclusive: bool = True
 
+    # --- Учитель языков (немецкий, чешский) ---
+    lang_user_ids: str = ""  # кому доступен словарь и уроки; пусто = только админы
+    lang_model: str = ""  # модель для уроков и словаря; пусто = DEFAULT_MODEL
+    lang_daily_from: int = 8  # ежедневное повторение — в случайное время в этом окне (часы)
+    lang_daily_to: int = 17
+    lang_daily_min: int = 5  # и случайное число слов
+    lang_daily_max: int = 15
+
     # --- Мониторинг и бэкапы ---
     gpu_temp_alert: int = 85  # °C, выше — предупреждение админам
     # Снимок nvidia-smi, который пишет хост (windows/gpu-stats.ps1); пусто = звать nvidia-smi
@@ -82,6 +90,14 @@ class Settings(BaseSettings):
     @property
     def admins(self) -> frozenset[int]:
         return parse_ids(self.admin_ids)
+
+    @property
+    def lang_users(self) -> frozenset[int]:
+        return parse_ids(self.lang_user_ids) or self.admins
+
+    @property
+    def tutor_model(self) -> str:
+        return self.lang_model or self.default_model
 
     @property
     def web_enabled(self) -> bool:

@@ -14,6 +14,7 @@ from .config import Settings
 from .db import Database, User
 from .docs import PersonalDocs
 from .knowledge import KnowledgeBase
+from .lang import LangStore
 from .llm import LLMError, OllamaClient, ToolsNotSupported
 from .memory import MemoryStore
 from .modes import Mode, get_mode, style_instructions
@@ -129,6 +130,7 @@ class Assistant:
         self.knowledge = knowledge
         self.web = web
         self.docs = docs or PersonalDocs(db, llm, settings.embed_model)
+        self.lang = LangStore(db)
         self._no_tools: set[str] = set()  # модели, которые не умеют tool calling
         self._summary_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -150,13 +152,15 @@ class Assistant:
         s = self.settings
         if turn.user and turn.user.model:
             return turn.user.model
+        mode = mode or self.mode_for(turn)
+        if mode.key == "lang":
+            return s.tutor_model  # автовыбор отдал бы короткие реплики 3b-модели, а она путает языки
         if not s.auto_model:
             return s.default_model
         try:
             available = await self.llm.list_models(cached=True)
         except LLMError:
             available = None
-        mode = mode or self.mode_for(turn)
         return choose_model(
             text, default=s.default_model, code=s.code_model, fast=s.fast_model,
             available=available, prefer_code=mode.prefer_code_model,
@@ -220,6 +224,9 @@ class Assistant:
             if doc_passages:
                 parts.append("Выдержки из личных документов пользователя (в скобках — файл):\n\n"
                              + "\n\n".join(f"[{p.source}]\n{p.text}" for p in doc_passages))
+
+        if mode.key == "lang" and turn.registered:
+            parts.append(await self.lang.context_for(turn.user_id))
 
         if mode.key == "defense":
             state = await self.db.get_state(turn.chat_id)

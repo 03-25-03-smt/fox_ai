@@ -27,13 +27,20 @@ WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
 WHISPER_COMPUTE = os.environ.get("WHISPER_COMPUTE", "float16")
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE") or None  # None = автоопределение
 IDLE_UNLOAD = float(os.environ.get("IDLE_UNLOAD_SECONDS", "600"))
-PIPER_VOICE = os.environ.get("PIPER_VOICE", "/opt/voices/ru_RU-irina-medium.onnx")
+VOICES_DIR = Path(os.environ.get("PIPER_VOICES_DIR", "/opt/voices"))
+# Голос Piper для каждого языка: русский — ответы бота, немецкий и чешский — учитель языков
+VOICES = {
+    "ru": os.environ.get("PIPER_VOICE", "ru_RU-irina-medium"),
+    "de": os.environ.get("PIPER_VOICE_DE", "de_DE-thorsten-medium"),
+    "cs": os.environ.get("PIPER_VOICE_CS", "cs_CZ-jirka-medium"),
+}
+STT_LANGUAGES = {"ru", "de", "cs", "en", "uk"}
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 MAX_TTS_CHARS = 2000
 
 _lock = asyncio.Lock()
 _whisper = None
-_voice = None
+_voices: dict[str, object] = {}
 _last_used = 0.0
 
 
@@ -47,18 +54,24 @@ def _load_whisper():
     return _whisper
 
 
-def _load_voice():
-    global _voice
-    if _voice is None:
+def _voice_path(lang: str) -> Path:
+    name = VOICES[lang]
+    return Path(name) if name.endswith(".onnx") else VOICES_DIR / f"{name}.onnx"
+
+
+def _load_voice(lang: str):
+    if lang not in _voices:
         from piper import PiperVoice
 
-        _voice = PiperVoice.load(PIPER_VOICE)
-    return _voice
+        _voices[lang] = PiperVoice.load(str(_voice_path(lang)))
+    return _voices[lang]
 
 
-def _transcribe(path: str) -> tuple[str, str]:
+def _transcribe(path: str, language: str | None = None) -> tuple[str, str]:
     model = _load_whisper()
-    segments, info = model.transcribe(path, language=WHISPER_LANGUAGE, vad_filter=True, beam_size=5)
+    segments, info = model.transcribe(
+        path, language=language or WHISPER_LANGUAGE, vad_filter=True, beam_size=5
+    )
     text = " ".join(s.text.strip() for s in segments).strip()
     return text, info.language
 
@@ -71,8 +84,8 @@ def clean_for_speech(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()[:MAX_TTS_CHARS]
 
 
-def _synthesize(text: str) -> bytes:
-    voice = _load_voice()
+def _synthesize(text: str, lang: str = "ru") -> bytes:
+    voice = _load_voice(lang)
     with tempfile.TemporaryDirectory() as tmp:
         wav_path, ogg_path = Path(tmp) / "out.wav", Path(tmp) / "out.ogg"
         with wave.open(str(wav_path), "wb") as wav:
@@ -109,12 +122,19 @@ app = FastAPI(title="fox_ai speech", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    return {"ok": True, "whisper_loaded": _whisper is not None, "voice": Path(PIPER_VOICE).exists()}
+    return {
+        "ok": True,
+        "whisper_loaded": _whisper is not None,
+        "voices": {lang: _voice_path(lang).exists() for lang in VOICES},
+    }
 
 
 @app.post("/stt")
-async def stt(file: UploadFile) -> dict[str, str]:
+async def stt(file: UploadFile, language: str | None = None) -> dict[str, str]:
+    """language — код языка (de, cs…), если он известен заранее; иначе автоопределение."""
     global _last_used
+    if language is not None and language not in STT_LANGUAGES:
+        raise HTTPException(400, f"Язык {language} не поддерживается")
     data = await file.read(MAX_AUDIO_BYTES + 1)
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "Аудио больше 25 МБ")
@@ -124,7 +144,7 @@ async def stt(file: UploadFile) -> dict[str, str]:
         tmp.flush()
         async with _lock:
             try:
-                text, language = await asyncio.to_thread(_transcribe, tmp.name)
+                text, language = await asyncio.to_thread(_transcribe, tmp.name, language)
             except Exception as exc:
                 log.exception("transcription failed")
                 raise HTTPException(500, f"Не удалось распознать: {exc}") from exc
@@ -134,15 +154,18 @@ async def stt(file: UploadFile) -> dict[str, str]:
 
 class TTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
+    lang: str = "ru"
 
 
 @app.post("/tts")
 async def tts(req: TTSRequest) -> Response:
+    if req.lang not in VOICES:
+        raise HTTPException(400, f"Нет голоса для языка {req.lang}")
     text = clean_for_speech(req.text)
     if not text:
         raise HTTPException(400, "Нечего озвучивать")
     try:
-        audio = await asyncio.to_thread(_synthesize, text)
+        audio = await asyncio.to_thread(_synthesize, text, req.lang)
     except Exception as exc:
         log.exception("tts failed")
         raise HTTPException(500, f"Не удалось озвучить: {exc}") from exc

@@ -109,6 +109,59 @@ CREATE TABLE IF NOT EXISTS usage (
     PRIMARY KEY (user_id, day)
 );
 
+-- Учитель языков: личный словарь с интервальным повторением (Leitner: box 0..5)
+CREATE TABLE IF NOT EXISTS vocab (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lang        TEXT NOT NULL,
+    word        TEXT NOT NULL,           -- как показывать: «der Hund»
+    lemma       TEXT NOT NULL,           -- ключ уникальности: «hund»
+    sort_key    TEXT NOT NULL,           -- алфавитный порядок с учётом языка
+    translation TEXT NOT NULL,
+    pos         TEXT NOT NULL DEFAULT '',
+    grammar     TEXT NOT NULL DEFAULT '',
+    examples    TEXT NOT NULL DEFAULT '[]',
+    tip         TEXT NOT NULL DEFAULT '',
+    box         INTEGER NOT NULL DEFAULT 0,
+    due         TEXT NOT NULL,           -- локальная дата YYYY-MM-DD
+    correct     INTEGER NOT NULL DEFAULT 0,
+    wrong       INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, lang, lemma)
+);
+CREATE INDEX IF NOT EXISTS idx_vocab_due ON vocab(user_id, due);
+
+CREATE TABLE IF NOT EXISTS lang_levels (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lang    TEXT NOT NULL,
+    level   TEXT NOT NULL,
+    PRIMARY KEY (user_id, lang)
+);
+
+-- Текущий язык, план ежедневного повторения и серия дней
+CREATE TABLE IF NOT EXISTS lang_state (
+    user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    current     TEXT NOT NULL DEFAULT 'de',
+    daily       INTEGER NOT NULL DEFAULT 1,
+    plan_day    TEXT,
+    plan_at     TEXT,                    -- UTC, когда прислать повторение
+    plan_count  INTEGER NOT NULL DEFAULT 0,
+    plan_words  TEXT,                    -- JSON: id слов, которые ушли в повторение
+    plan_sent   INTEGER NOT NULL DEFAULT 0,
+    streak      INTEGER NOT NULL DEFAULT 0,
+    last_review TEXT
+);
+
+-- Пройденные уроки и тесты: чтобы не повторяться и предлагать следующее
+CREATE TABLE IF NOT EXISTS lang_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lang       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    topic      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS allowed_chats (
     chat_id  INTEGER PRIMARY KEY,
     title    TEXT NOT NULL DEFAULT '',

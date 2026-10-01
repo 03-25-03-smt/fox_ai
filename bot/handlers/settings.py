@@ -53,6 +53,13 @@ HELP_TEXT = (
     "/reset — забыть текущий диалог\n\n"
     "В группах: упомяни @бота, ответь на его сообщение или /ask."
 )
+LANG_HELP = (
+    "\n\n<b>Учитель языков 🇩🇪🇨🇿</b>\n"
+    "/w слово — перевод, примеры и озвучка, слово уходит в словарь\n"
+    "/dict — словарь по алфавиту · /quiz — повторение\n"
+    "/lesson · /test · /talk — урок, тест, разговор · /speak — произношение\n"
+    "/lang — уровень, статистика, ежедневное повторение"
+)
 ADMIN_HELP = (
     "\n\n<b>Админ</b>\n"
     "/adduser &lt;id&gt; [имя] · /deluser &lt;id&gt; · /users\n"
@@ -65,8 +72,9 @@ ADMIN_HELP = (
 
 @router.message(CommandStart())
 @router.message(Command("help"))
-async def cmd_start(message: Message, is_admin: bool) -> None:
-    await message.answer(HELP_TEXT + (ADMIN_HELP if is_admin else ""), parse_mode=ParseMode.HTML)
+async def cmd_start(message: Message, app: App, turn: Turn, is_admin: bool) -> None:
+    lang = LANG_HELP if turn.registered and turn.user_id in app.settings.lang_users else ""
+    await message.answer(HELP_TEXT + lang + (ADMIN_HELP if is_admin else ""), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("whoami"))
@@ -106,6 +114,11 @@ async def cmd_reset(message: Message, app: App, turn: Turn) -> None:
 # ---------------------------------------------------------------- режим
 
 
+def _mode_allowed(app: App, turn: Turn, key: str) -> bool:
+    """Закрытые режимы (учитель языков) — только тем, кому они разрешены."""
+    return not MODES[key].private or turn.user_id in app.settings.lang_users
+
+
 @router.message(Command("mode"))
 async def cmd_mode(message: Message, app: App, turn: Turn) -> None:
     if not await need_registered(message, turn):
@@ -116,6 +129,7 @@ async def cmd_mode(message: Message, app: App, turn: Turn) -> None:
             text=("✅ " if m.key == current.key else "") + m.title, callback_data=MODE_CB + m.key
         )]
         for m in MODES.values()
+        if _mode_allowed(app, turn, m.key)
     ]
     await message.answer(
         f"Текущий режим: {current.title}\nВыбери:",
@@ -126,12 +140,15 @@ async def cmd_mode(message: Message, app: App, turn: Turn) -> None:
 @router.callback_query(F.data.startswith(MODE_CB))
 async def on_mode_chosen(callback: CallbackQuery, app: App, turn: Turn) -> None:
     key = callback.data.removeprefix(MODE_CB)
-    if key not in MODES or not turn.registered:
+    if key not in MODES or not turn.registered or not _mode_allowed(app, turn, key):
         await callback.answer("Недоступно", show_alert=True)
         return
     await app.db.set_mode(turn.user_id, key)
     await callback.answer("Готово")
-    hint = "\nПришли код или проект и нажми /defense, чтобы начать." if key == "defense" else ""
+    hint = {
+        "defense": "\nПришли код или проект и нажми /defense, чтобы начать.",
+        "lang": "\nПиши на немецком или чешском — поправлю ошибки. Команды: /lang",
+    }.get(key, "")
     if isinstance(callback.message, Message):
         await callback.message.edit_text(f"✅ Режим: {MODES[key].title}{hint}")
 
