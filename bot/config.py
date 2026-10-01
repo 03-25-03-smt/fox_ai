@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     gpu_temp_alert: int = 85  # °C, выше — предупреждение админам
     # Снимок nvidia-smi, который пишет хост (windows/gpu-stats.ps1); пусто = звать nvidia-smi
     gpu_stats_file: str = ""
+    metrics_port: int = 0  # /metrics для Prometheus (внутри docker-сети); 0 = выключено
     # Папка обмена с агентом на Windows (windows/fox-agent.ps1); пусто = /logs, /restart, /power выключены
     host_dir: str = ""
     # Бережный режим P100: карта для LLM (часть имени), перегрев/остывание (°C), лимит мощности при перегреве

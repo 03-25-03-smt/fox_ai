@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from . import metrics
+
 EMBED_BATCH = 32
 MODELS_CACHE_TTL = 60.0
 
@@ -173,7 +175,9 @@ class OllamaClient:
     def _record_speed(self, model: str, data: dict[str, Any]) -> None:
         count, duration = data.get("eval_count"), data.get("eval_duration")
         if count and duration:
-            self.speeds.append(SpeedSample(model, int(count), count / (duration / 1e9), time.time()))
+            tps = count / (duration / 1e9)
+            self.speeds.append(SpeedSample(model, int(count), tps, time.time()))
+            metrics.record_speed(model, int(count), tps)
 
     async def chat(
         self,

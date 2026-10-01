@@ -15,6 +15,7 @@ from aiogram.types import (
     Message,
 )
 
+from .. import metrics
 from ..app import App
 from ..assistant import Turn
 from ..formatting import md_to_html, split_markdown, strip_think
@@ -160,6 +161,7 @@ async def respond(
             f"⏳ В очереди, передо мной {waiting}…" if app.queue.busy else "🦊 думаю…"
         )
         answer, status = "", ""
+        started = time.monotonic()
         try:
             async with app.queue.slot():
                 if waiting:
@@ -180,9 +182,12 @@ async def respond(
                         last_edit = time.monotonic()
         except LLMError as exc:
             log.warning("LLM error for user %s, model %s: %s", turn.user_id, model, exc)
+            metrics.ERRORS.labels(model).inc()
             await safe_edit(placeholder, f"⚠️ Ошибка модели {model}: {exc}")
             return None
 
+        metrics.REQUESTS.labels(mode.key, model).inc()
+        metrics.RESPONSE_SECONDS.labels(mode.key).observe(time.monotonic() - started)
         answer = strip_think(answer).strip() or "(модель вернула пустой ответ)"
         await app.db.add_message(
             turn.chat_id, "user", store_text or prompt_text, user_id=turn.user_id

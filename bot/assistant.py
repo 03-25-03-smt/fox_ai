@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from . import metrics
 from .aquarium import Aquarium
 from .aquarium_brain import AquariumBrain
 from .briefing import BriefingStore
@@ -340,6 +341,7 @@ class Assistant:
             for call in calls:
                 fn = call.get("function", {})
                 name, args = fn.get("name", ""), _parse_args(fn.get("arguments"))
+                metrics.TOOLS.labels(name or "?").inc()
                 yield Event("status", _status_text(name, args))
                 result = await self._exec_tool(name, args, turn)
                 messages.append({"role": "tool", "tool_name": name, "content": result})

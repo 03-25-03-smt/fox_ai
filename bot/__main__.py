@@ -16,6 +16,7 @@ from .intra import IntraClient
 from .knowledge import KnowledgeBase
 from .llm import OllamaClient
 from .memory import MemoryStore
+from .metrics import start as start_metrics
 from .services import ImageClient, SandboxClient, SpeechClient
 from .summarize import YouTube
 from .tasks import start_background
@@ -82,6 +83,8 @@ async def main() -> None:
     dp = Dispatcher(app=app)
     dp.include_router(build_router(app))
 
+    if settings.metrics_port:
+        start_metrics(app, settings.metrics_port)
     app.spawn(_initial_index(app))
     start_background(bot, app)
     try:

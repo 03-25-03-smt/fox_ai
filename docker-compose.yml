@@ -41,6 +41,9 @@ networks:
 volumes:
   bot_data: {}
   models: {}   # Whisper и SDXL-Turbo (кэш Hugging Face)
+  prometheus_data: {}
+  grafana_data: {}
+  open_webui: {}
 
 services:
   searxng:
@@ -109,6 +112,8 @@ services:
       - BACKUP_DIR=/app/backups
       # Температуры всех трёх карт пишет на хосте windows/gpu-stats.ps1
       - GPU_STATS_FILE=/app/gpu/gpu.csv
+      # /metrics для Prometheus — только внутри docker-сети, наружу порт не публикуется
+      - METRICS_PORT=9101
       # Обмен с агентом Windows (windows/fox-agent.ps1): /logs, /restart, /power
       - HOST_DIR=/app/host
     volumes:
@@ -121,3 +126,63 @@ services:
     depends_on:
       - searxng
       - sandbox
+
+  # ---------------------------------------------------------------- мониторинг (профиль monitoring)
+  # Графики температуры, VRAM, скорости и запросов: http://localhost:3000 (только с этого ПК)
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [monitoring]
+    restart: unless-stopped
+    <<: [*hardening, *logging]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on: [bot]
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: [monitoring]
+    restart: unless-stopped
+    <<: [*hardening, *logging]
+    # Только localhost: снаружи Grafana недоступна
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/fox-ai.json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+
+  # ---------------------------------------------------------------- Open WebUI (профиль webui)
+  # Веб-чат на той же Ollama для длинных сессий за компьютером: http://localhost:3001
+  # Первый зарегистрированный пользователь становится админом; следующие ждут его одобрения
+  # (DEFAULT_USER_ROLE=pending). Пустой WEBUI_SECRET_KEY — ключ сгенерируется и сохранится в томе.
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.11.4
+    profiles: [webui]
+    restart: unless-stopped
+    <<: *logging
+    ports:
+      - "127.0.0.1:3001:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      - DEFAULT_USER_ROLE=pending
+      - ANONYMIZED_TELEMETRY=false
+      - ENABLE_OPENAI_API=false
+      - SCARF_NO_ANALYTICS=true
+      - DO_NOT_TRACK=true
+    volumes:
+      - open_webui:/app/backend/data
