@@ -500,6 +500,14 @@ class Database:
         )
         return [StoredMessage(*r) for r in reversed(rows)]
 
+    async def all_messages(self, chat_id: int, limit: int = 2000) -> list[tuple[str, str, str, str | None]]:
+        """(role, content, created_at, model) — весь диалог по порядку, для экспорта."""
+        rows = await self._fetchall(
+            "SELECT role, content, created_at, model FROM chat_messages WHERE chat_id = ? "
+            "ORDER BY id DESC LIMIT ?", (chat_id, limit),
+        )
+        return [tuple(r) for r in reversed(rows)]
+
     async def message_by_tg_id(self, chat_id: int, tg_msg_id: int) -> StoredMessage | None:
         row = await self._fetchone(
             "SELECT id, role, content, tg_msg_id FROM chat_messages "

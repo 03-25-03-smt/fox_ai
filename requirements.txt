@@ -8,3 +8,5 @@ norminette==3.3.60
 tzdata==2026.4
 # пересказ YouTube: yt-dlp с закреплёнными зависимостями и JS-рантаймом deno
 yt-dlp[default,pin,deno,pin-deno]==2026.8.19
+# экспорт диалога в PDF
+fpdf2==2.8.9

@@ -5,7 +5,7 @@ from aiogram.types import BotCommand, Message
 
 from ..access import AccessMiddleware
 from ..app import App
-from . import admin, aquarium, briefing, chat, code42, files, kitchen, lang, settings, tools
+from . import admin, aquarium, briefing, chat, code42, export, files, kitchen, lang, settings, tools
 
 BOT_COMMANDS = [
     BotCommand(command="mode", description="Режим: общение / 42 / защита"),
@@ -35,6 +35,8 @@ BOT_COMMANDS = [
     BotCommand(command="reminders", description="Мои напоминания"),
     BotCommand(command="memories", description="Что бот обо мне помнит"),
     BotCommand(command="docs", description="Мои документы"),
+    BotCommand(command="export", description="Диалог в Markdown / PDF"),
+    BotCommand(command="ics", description="Напоминания в календарь (.ics)"),
     BotCommand(command="reset", description="Очистить текущий диалог"),
     BotCommand(command="whoami", description="Мои настройки"),
     BotCommand(command="help", description="Помощь"),
@@ -57,7 +59,7 @@ def build_router(app: App) -> Router:
 
     # aquarium и lang — раньше files и chat: они перехватывают текст, голосовые и файлы,
     # когда ждут ответа (причина «не могу», ответ на вопрос, предложение со словом)
-    for module in (settings, admin, tools, briefing, kitchen, code42, aquarium, lang, files, chat):
+    for module in (settings, admin, tools, briefing, kitchen, export, code42, aquarium, lang, files, chat):
         root.include_router(module.router.build())
     fallback = Router(name="fallback")
     fallback.message.register(chat.on_text, F.text & ~F.text.startswith("/"))
