@@ -15,6 +15,7 @@ from .aquarium_brain import AquariumBrain
 from .config import Settings
 from .db import Database, User
 from .docs import PersonalDocs
+from .kitchen import Kitchen
 from .knowledge import KnowledgeBase
 from .lang import LangStore
 from .llm import LLMError, OllamaClient, ToolsNotSupported
@@ -154,6 +155,7 @@ class Assistant:
         self.web = web
         self.docs = docs or PersonalDocs(db, llm, settings.embed_model)
         self.lang = LangStore(db)
+        self.kitchen = Kitchen(db)
         self.sandbox = None  # SandboxClient: инструмент run_python
         # Картинки, которые построил run_python во время ответа: chat_id -> PNG
         self.images: defaultdict[int, list[bytes]] = defaultdict(list)

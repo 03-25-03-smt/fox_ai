@@ -228,6 +228,26 @@ CREATE TABLE IF NOT EXISTS aq_water (
     value   REAL NOT NULL
 );
 
+-- Кухня: общий для чата список покупок и книга рецептов
+CREATE TABLE IF NOT EXISTS shop_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    qty        TEXT NOT NULL DEFAULT '',
+    done       INTEGER NOT NULL DEFAULT 0,
+    added_by   TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shop_items ON shop_items(chat_id);
+CREATE TABLE IF NOT EXISTS recipes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    title      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    added_by   TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS allowed_chats (
     chat_id  INTEGER PRIMARY KEY,
     title    TEXT NOT NULL DEFAULT '',
