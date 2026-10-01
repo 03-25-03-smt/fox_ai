@@ -21,6 +21,7 @@ from .llm import LLMError, OllamaClient, ToolsNotSupported
 from .memory import MemoryStore
 from .modes import Mode, get_mode, style_instructions
 from .routing import choose_model
+from .services import ServiceError
 from .timeparse import parse_reminder
 from .web import WebError, WebTools
 
@@ -70,6 +71,26 @@ REMINDER_TOOL: dict[str, Any] = {
         },
     },
 }
+
+PYTHON_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "run_python",
+        "description": "Выполнить код Python 3 в изолированной песочнице без интернета. Используй для "
+                       "точных вычислений, конвертации единиц, процентов, бюджета, статистики, дат и "
+                       "графиков. Доступны numpy, pandas, matplotlib, sympy, scipy. Результат печатай "
+                       "через print(); графики строй matplotlib — картинка уйдёт пользователю сама.",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string", "description": "Код Python"}},
+            "required": ["code"],
+        },
+    },
+}
+PYTHON_HINT = (
+    "Для любых вычислений, где важна точность (арифметика, проценты, единицы, даты, статистика), "
+    "и для графиков вызывай run_python, а не считай в уме."
+)
 
 WEB_HINT = (
     "У тебя есть доступ в интернет через инструменты web_search и fetch_url. "
@@ -133,6 +154,9 @@ class Assistant:
         self.web = web
         self.docs = docs or PersonalDocs(db, llm, settings.embed_model)
         self.lang = LangStore(db)
+        self.sandbox = None  # SandboxClient: инструмент run_python
+        # Картинки, которые построил run_python во время ответа: chat_id -> PNG
+        self.images: defaultdict[int, list[bytes]] = defaultdict(list)
         self.aquarium = Aquarium(db, self._zone(settings.aquarium_timezone or settings.timezone))
         self.aquarium_brain = AquariumBrain(db)
         self._no_tools: set[str] = set()  # модели, которые не умеют tool calling
@@ -248,6 +272,8 @@ class Assistant:
         if with_tools_hint:
             if self.web is not None:
                 parts.append(WEB_HINT)
+            if self.sandbox is not None:
+                parts.append(PYTHON_HINT)
             if turn.registered:
                 parts.append(REMINDER_HINT)
 
@@ -259,6 +285,8 @@ class Assistant:
 
     def tools_for(self, turn: Turn) -> list[dict[str, Any]]:
         tools = list(WEB_TOOLS) if self.web is not None else []
+        if self.sandbox is not None:
+            tools.append(PYTHON_TOOL)
         if turn.registered:
             tools.append(REMINDER_TOOL)
         return tools
@@ -315,6 +343,8 @@ class Assistant:
         try:
             if name == "set_reminder":
                 return await self._tool_reminder(args, turn)
+            if name == "run_python":
+                return await self._tool_python(args, turn)
             if self.web is None:
                 return "Ошибка: интернет выключен"
             if name == "web_search":
@@ -322,9 +352,20 @@ class Assistant:
             if name == "fetch_url":
                 title, text = await self.web.fetch(str(args.get("url", "")))
                 return f"{title}\n\n{text}" if title else text
-        except WebError as exc:
+        except (WebError, ServiceError) as exc:
             return f"Ошибка: {exc}"
         return f"Ошибка: неизвестный инструмент {name}"
+
+    async def _tool_python(self, args: dict[str, Any], turn: Turn | None) -> str:
+        if self.sandbox is None:
+            return "Ошибка: песочница выключена"
+        code = str(args.get("code", "")).strip()
+        if not code:
+            return "Ошибка: пустой код"
+        result = await self.sandbox.python(code)
+        if turn is not None and result.images:
+            self.images[turn.chat_id].extend(result.images)
+        return result.as_text()
 
     async def _tool_reminder(self, args: dict[str, Any], turn: Turn | None) -> str:
         if turn is None or not turn.registered:
@@ -429,4 +470,6 @@ def _status_text(name: str, args: dict[str, Any]) -> str:
         return f"🌐 Читаю: {args.get('url', '')}"
     if name == "set_reminder":
         return f"⏰ Ставлю напоминание: {args.get('text', '')}"
+    if name == "run_python":
+        return "🐍 Считаю на Python…"
     return f"🛠 {name}"

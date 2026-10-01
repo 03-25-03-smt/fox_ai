@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+import base64
+
 import httpx
 
 
@@ -74,6 +76,30 @@ class RunResult:
         return any(k in text for k in ("leak", "invalid read", "invalid write", "sanitizer", "uninitialised"))
 
 
+@dataclass(frozen=True)
+class PythonResult:
+    run: ProcResult
+    images: list[bytes]  # PNG
+
+    def as_text(self, limit: int = 6000) -> str:
+        """Результат для модели и для пользователя."""
+        r = self.run
+        parts = []
+        if r.stdout.strip():
+            parts.append(f"stdout:\n{r.stdout.strip()[:limit]}")
+        if r.stderr.strip():
+            parts.append(f"stderr:\n{r.stderr.strip()[-limit:]}")
+        if r.timed_out:
+            parts.append("Превышено время выполнения.")
+        elif r.signal:
+            parts.append(f"Процесс убит сигналом {r.signal} (вероятно, не хватило памяти).")
+        elif r.exit_code:
+            parts.append(f"Код выхода: {r.exit_code}")
+        if self.images:
+            parts.append(f"Построено графиков: {len(self.images)} (пользователь их увидит).")
+        return "\n\n".join(parts) or "(нет вывода — используй print())"
+
+
 class SandboxClient(_Client):
     name = "Песочница"
 
@@ -100,6 +126,11 @@ class SandboxClient(_Client):
             compiled=data["compiled"], compile_command=data["compile_command"],
             compile_output=data["compile_output"], run=run, valgrind_log=data.get("valgrind_log"),
         )
+
+    async def python(self, code: str, timeout: float = 20.0) -> "PythonResult":
+        resp = await self._request("POST", "/python", json={"code": code, "timeout": timeout})
+        data = resp.json()
+        return PythonResult(ProcResult(**data["run"]), [base64.b64decode(i) for i in data.get("images", [])])
 
     async def check_project(self, files: dict[str, str]) -> dict[str, Any]:
         resp = await self._request("POST", "/project", json={"files": files})

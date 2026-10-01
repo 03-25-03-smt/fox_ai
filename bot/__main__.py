@@ -35,11 +35,13 @@ def build_app(settings: Settings, db: Database) -> App:
     intra = None
     if settings.intra_enabled:
         intra = IntraClient(settings.intra_client_id, settings.intra_client_secret.get_secret_value())
+    sandbox = SandboxClient(settings.sandbox_url) if settings.sandbox_url else None
+    assistant.sandbox = sandbox
     return App(
         settings=settings,
         db=db,
         assistant=assistant,
-        sandbox=SandboxClient(settings.sandbox_url) if settings.sandbox_url else None,
+        sandbox=sandbox,
         speech=SpeechClient(settings.speech_url) if settings.speech_url else None,
         imagegen=ImageClient(settings.imagegen_url) if settings.imagegen_url else None,
         intra=intra,

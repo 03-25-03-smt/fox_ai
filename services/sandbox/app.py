@@ -1,4 +1,5 @@
-"""Fox AI sandbox: компиляция и запуск C-кода, valgrind/ASan, проверка проектов 42.
+"""Fox AI sandbox: компиляция и запуск C-кода, valgrind/ASan, проверка проектов 42,
+запуск Python (вычисления, таблицы, графики matplotlib -> PNG).
 
 Сервис рассчитан на запуск в отдельном контейнере: без интернета (internal-сеть),
 read-only rootfs, без capabilities, с лимитами памяти/процессов. Внутри каждый запуск
@@ -6,6 +7,7 @@ read-only rootfs, без capabilities, с лимитами памяти/проц
 """
 
 import asyncio
+import base64
 import os
 import re
 import resource
@@ -64,6 +66,16 @@ class RunResponse(BaseModel):
     compile_output: str
     run: ProcResult | None = None
     valgrind_log: str | None = None
+
+
+class PythonRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64 * 1024)
+    timeout: float = Field(20.0, gt=0, le=60)
+
+
+class PythonResponse(BaseModel):
+    run: ProcResult
+    images: list[str] = Field(default_factory=list)  # PNG в base64
 
 
 class ProjectRequest(BaseModel):
@@ -263,6 +275,7 @@ async def health() -> dict[str, object]:
         "ok": True,
         "valgrind": shutil.which("valgrind") is not None,
         "norminette": shutil.which("norminette") is not None,
+        "python": True,
     }
 
 
@@ -314,6 +327,52 @@ async def run_code(req: RunRequest) -> RunResponse:
                 compiled=True, compile_command=command, compile_output=compile_output,
                 run=run, valgrind_log=vg_log,
             )
+
+
+# ---------------------------------------------------------------- /python
+
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# Обёртка: графики matplotlib сохраняются в файлы вместо plt.show()
+PY_PRELUDE = """\
+import os as _os
+_os.environ.setdefault("MPLBACKEND", "Agg")
+"""
+PY_EPILOGUE = """
+try:
+    import matplotlib.pyplot as _plt
+    for _i, _n in enumerate(_plt.get_fignums()[:4]):
+        _plt.figure(_n).savefig(f"fox_plot_{_i}.png", dpi=110, bbox_inches="tight")
+except ImportError:
+    pass
+"""
+
+
+@app.post("/python", response_model=PythonResponse)
+async def run_python(req: PythonRequest) -> PythonResponse:
+    async with _slots:
+        with tempfile.TemporaryDirectory(prefix="py_", dir=WORK_ROOT) as tmp:
+            root = Path(tmp)
+            code = req.code.replace("plt.show()", "pass")
+            # Пользовательский код — в отдельном файле: номера строк в трейсбеке совпадают с его кодом
+            (root / "user_code.py").write_text(code, encoding="utf-8")
+            (root / "main.py").write_text(
+                PY_PRELUDE
+                + "_ns = {'__name__': '__main__'}\n"
+                + "exec(compile(open('user_code.py', encoding='utf-8').read(), 'user_code.py', 'exec'), _ns)\n"
+                + PY_EPILOGUE,
+                encoding="utf-8",
+            )
+            run = await _run(
+                ["python3", "-I", "main.py"], root, req.timeout,
+                env={"MPLBACKEND": "Agg", "MPLCONFIGDIR": str(root), "OPENBLAS_NUM_THREADS": "1"},
+            )
+            images = []
+            for path in sorted(root.glob("fox_plot_*.png"))[:MAX_IMAGES]:
+                data = path.read_bytes()
+                if len(data) <= MAX_IMAGE_BYTES:
+                    images.append(base64.b64encode(data).decode())
+            return PythonResponse(run=run, images=images)
 
 
 # ---------------------------------------------------------------- /project

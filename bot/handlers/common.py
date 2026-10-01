@@ -193,6 +193,8 @@ async def respond(
         await app.db.set_tg_msg_id(answer_id, last.message_id)
         await app.count_usage(turn.user_id)
 
+    for png in assistant.images.pop(turn.chat_id, []):
+        await target.answer_photo(BufferedInputFile(png, "plot.png"))
     if voice:
         await send_voice(app, target, answer)
     app.spawn(assistant.after_reply(turn, user_text, extract_memory=extract_memory))

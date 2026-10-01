@@ -118,6 +118,7 @@ class Env:
             PersonalDocs(self.db, self.llm, self.settings.embed_model),
         )
         self.sandbox, self.speech, self.images = FakeSandbox(), FakeSpeech(), FakeImages()
+        self.assistant.sandbox = self.sandbox
         self.app = App(
             settings=self.settings, db=self.db, assistant=self.assistant,
             sandbox=self.sandbox, speech=self.speech, imagegen=self.images,

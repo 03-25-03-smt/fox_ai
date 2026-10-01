@@ -4,7 +4,7 @@ import hashlib
 import re
 
 from bot.llm import LoadedModel, StreamChunk, ToolsNotSupported
-from bot.services import ProcResult, RunResult
+from bot.services import ProcResult, PythonResult, RunResult
 from bot.web import SearchResult
 
 DIM = 64
@@ -93,6 +93,8 @@ class FakeSandbox:
     def __init__(self) -> None:
         self.runs: list[dict] = []
         self.projects: list[dict] = []
+        self.python_runs: list[str] = []
+        self.python_stdout = "42\n"
         self.result = RunResult(
             compiled=True, compile_command="cc -Wall -Wextra -Werror main.c -o fox_prog",
             compile_output="", valgrind_log=None,
@@ -109,6 +111,12 @@ class FakeSandbox:
     async def run(self, files, **kwargs):
         self.runs.append({"files": files, **kwargs})
         return self.result
+
+    async def python(self, code, timeout=20.0):
+        self.python_runs.append(code)
+        out = ProcResult(exit_code=0, signal=None, timed_out=False, stdout=self.python_stdout,
+                         stderr="", duration_ms=5)
+        return PythonResult(out, [b"\x89PNG-plot"] if "plt" in code else [])
 
     async def check_project(self, files):
         self.projects.append(files)

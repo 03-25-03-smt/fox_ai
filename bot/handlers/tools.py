@@ -181,6 +181,54 @@ async def cmd_search(message: Message, command: CommandObject, app: App, turn: T
     await respond(message, app, turn, prompt, store_text=f"/search {query}", extract_memory=False)
 
 
+# ---------------------------------------------------------------- Python
+
+
+def _looks_like_code(text: str) -> bool:
+    return "\n" in text or text.startswith(("import ", "from ", "print(")) or "=" in text.split("\n")[0]
+
+
+def strip_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
+@router.message(Command("py"))
+async def cmd_py(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    """/py <код> — выполнить как есть; /py <задача словами> — модель напишет и выполнит код."""
+    raw = strip_fence(command.args or "")
+    if not raw:
+        await message.answer(
+            "🐍 Примеры:\n/py print(2**100)\n"
+            "/py сколько будет 1850 € в кронах по курсу 24.3 и сколько это в месяц на 12 мес\n"
+            "/py построй график sin(x) и cos(x) от 0 до 2π\n\n"
+            "Есть numpy, pandas, matplotlib, sympy, scipy. Можно и без команды — "
+            "я сам считаю на Python, когда нужна точность."
+        )
+        return
+    if app.sandbox is None:
+        await message.answer("🐍 Песочница выключена (не задан SANDBOX_URL).")
+        return
+    if not _looks_like_code(raw):
+        prompt = (f"Задача: {raw}\n\nРеши её, обязательно вызвав run_python (напечатай итог print-ом; "
+                  "если просят график — построй matplotlib). Затем коротко объясни результат.")
+        await respond(message, app, turn, prompt, store_text=f"/py {raw}")
+        return
+    status = await message.answer("🐍 Выполняю…")
+    try:
+        result = await app.sandbox.python(raw)
+    except ServiceError as exc:
+        await status.edit_text(f"⚠️ {exc}")
+        return
+    text = result.as_text(3500)
+    await status.edit_text(f"<pre>{html.escape(text)}</pre>", parse_mode=ParseMode.HTML)
+    for png in result.images:
+        await message.answer_photo(BufferedInputFile(png, "plot.png"))
+
+
 # ---------------------------------------------------------------- картинки
 
 

@@ -1,3 +1,9 @@
 fastapi==0.141.1
 uvicorn==0.54.0
 norminette==3.3.60
+# для /python: вычисления, таблицы, графики
+numpy==2.5.3
+pandas==3.0.6
+matplotlib==3.11.2
+sympy==1.14.0
+scipy==1.18.1
