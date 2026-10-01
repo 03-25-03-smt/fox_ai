@@ -75,6 +75,7 @@ ADMIN_HELP = (
     "\n\n<b>Админ</b>\n"
     "/adduser &lt;id&gt; [имя] · /deluser &lt;id&gt; · /users\n"
     "/status — GPU, очередь, модели · /backup — бэкап БД\n"
+    "/pull &lt;модель&gt; · /rm &lt;модель&gt; · /bench — скачать, удалить, сравнить скорость\n"
     "/reindex — переиндексировать базу знаний\n"
     "Документ с подписью <code>/kb</code> — в общую базу знаний\n"
     "/allowchat · /denychat — пустить/убрать всех участников группы"

@@ -268,7 +268,7 @@ powershell -ExecutionPolicy Bypass -File windows\install-autostart.ps1 -Lock
 git pull; docker compose up -d --build
 docker image prune -f; docker builder prune -f   # убрать старые образы, иначе копятся десятки ГБ
 
-# Новая модель
+# Новая модель — из Telegram: /pull qwen2.5:14b (с прогрессом), /rm <модель>, /bench — сравнить скорость
 ollama pull qwen2.5:14b
 
 # Логи и перезапуск

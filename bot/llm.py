@@ -88,6 +88,54 @@ class OllamaClient:
             await self.unload(name)
         return names
 
+    async def pull(self, model: str) -> AsyncIterator[dict[str, Any]]:
+        """Скачивает модель, отдаёт события прогресса Ollama: {status, total, completed}."""
+        try:
+            async with self._client.stream("POST", "/api/pull", json={"model": model, "stream": True},
+                                           timeout=httpx.Timeout(None, connect=10.0)) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode(errors="replace")
+                    raise LLMError(_extract_error(body) or f"HTTP {resp.status_code}")
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    if "error" in data:
+                        raise LLMError(str(data["error"]))
+                    yield data
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Ollama недоступна: {exc}") from exc
+        self._models_cache = None
+
+    async def delete(self, model: str) -> None:
+        try:
+            resp = await self._client.request("DELETE", "/api/delete", json={"model": model})
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Ollama недоступна: {exc}") from exc
+        if resp.status_code != 200:
+            raise LLMError(_extract_error(resp.text) or f"HTTP {resp.status_code}")
+        self._models_cache = None
+
+    async def bench(self, model: str, prompt: str, num_predict: int = 200) -> dict[str, float]:
+        """Один прогон без стрима: скорость генерации, чтения промпта и загрузки модели."""
+        data = await self._post("/api/generate", {
+            "model": model, "prompt": prompt, "stream": False,
+            "options": {**self._options(None), "num_predict": num_predict, "temperature": 0},
+        })
+        self._record_speed(model, data)
+
+        def rate(count: str, duration: str) -> float:
+            c, d = data.get(count) or 0, data.get(duration) or 0
+            return c / (d / 1e9) if d else 0.0
+
+        return {
+            "gen_tps": rate("eval_count", "eval_duration"),
+            "prompt_tps": rate("prompt_eval_count", "prompt_eval_duration"),
+            "load_s": (data.get("load_duration") or 0) / 1e9,
+            "total_s": (data.get("total_duration") or 0) / 1e9,
+            "tokens": float(data.get("eval_count") or 0),
+        }
+
     async def chat_stream(
         self,
         model: str,

@@ -42,6 +42,24 @@ class FakeLLM:
     async def loaded_models(self):
         return [LoadedModel("qwen2.5:7b", 5 * 1024**3, 5 * 1024**3)]
 
+    async def pull(self, model):
+        if model == "bad:model":
+            from bot.llm import LLMError
+
+            raise LLMError("pull model manifest: file does not exist")
+        yield {"status": "pulling manifest"}
+        for done in (0, 2 * 1024**3, 4 * 1024**3):
+            yield {"status": "pulling", "total": 4 * 1024**3, "completed": done}
+        yield {"status": "success"}
+        self.models.append(model)
+
+    async def delete(self, model):
+        self.models.remove(model)
+
+    async def bench(self, model, prompt, num_predict=200):
+        return {"gen_tps": 40.0 if "7b" in model else 80.0, "prompt_tps": 900.0, "load_s": 2.5,
+                "total_s": 7.0, "tokens": 200.0}
+
     async def unload_all(self):
         self.unloaded.append("*")
         return ["qwen2.5:7b"]
