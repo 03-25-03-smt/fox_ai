@@ -6,3 +6,5 @@ numpy==2.5.3
 pypdf==6.19.0
 norminette==3.3.60
 tzdata==2026.4
+# пересказ YouTube: yt-dlp с закреплёнными зависимостями и JS-рантаймом deno
+yt-dlp[default,pin,deno,pin-deno]==2026.8.19

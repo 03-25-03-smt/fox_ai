@@ -47,6 +47,7 @@ HELP_TEXT = (
     "<b>Инструменты</b>\n"
     "/search — поиск в интернете · /draw — нарисовать картинку\n"
     "/py — вычисления и графики на Python\n"
+    "Ссылка или /sum &lt;ссылка&gt; — пересказ статьи или YouTube\n"
     "/remind — напоминание · /reminders — список\n\n"
     "<b>Память и документы</b>\n"
     "/remember · /memories · /forget\n"

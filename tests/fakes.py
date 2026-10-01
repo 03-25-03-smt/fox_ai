@@ -76,14 +76,15 @@ class FakeWeb:
     def __init__(self) -> None:
         self.queries: list[str] = []
         self.fetched: list[str] = []
+        self.page_text = "Page body text"
 
     async def search(self, query: str, limit: int = 6):
         self.queries.append(query)
         return [SearchResult("Ollama release", "https://example.com/ollama", "Ollama 0.34 released")]
 
-    async def fetch(self, url: str):
+    async def fetch(self, url: str, max_chars: int = 8000):
         self.fetched.append(url)
-        return "Page title", "Page body text"
+        return "Page title", self.page_text[:max_chars]
 
     async def close(self) -> None:
         pass
@@ -165,6 +166,21 @@ class FakeImages:
 
     async def health(self) -> bool:
         return False
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeYouTube:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.text = "В этом видео автор объясняет указатели в C. " * 20
+
+    async def transcript(self, url: str):
+        from bot.summarize import Transcript
+
+        self.urls.append(url)
+        return Transcript("Указатели в C", self.text, "автосубтитры (ru)", 754, url)
 
     async def close(self) -> None:
         pass

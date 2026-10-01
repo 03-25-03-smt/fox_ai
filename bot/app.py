@@ -51,6 +51,7 @@ class App:
     speech: SpeechClient | None = None
     imagegen: ImageClient | None = None
     intra: IntraClient | None = None
+    youtube: object | None = None  # summarize.YouTube: субтитры и аудио с YouTube
     queue: GpuQueue = field(default_factory=lambda: GpuQueue(2))
     image_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     chat_locks: defaultdict[int, asyncio.Lock] = field(default_factory=lambda: defaultdict(asyncio.Lock))
@@ -87,7 +88,7 @@ class App:
     async def close(self) -> None:
         for task in list(self.background):
             task.cancel()
-        for client in (self.sandbox, self.speech, self.imagegen, self.intra, self.assistant.web):
+        for client in (self.sandbox, self.speech, self.imagegen, self.intra, self.youtube, self.assistant.web):
             if client is not None:
                 await client.close()
         await self.assistant.llm.close()

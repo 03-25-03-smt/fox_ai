@@ -19,6 +19,7 @@ from ..app import App
 from ..assistant import Turn
 from ..llm import LLMError
 from ..services import ServiceError
+from ..summarize import only_link
 from .common import (
     CB_ALT,
     CB_ALT_MODEL,
@@ -30,6 +31,7 @@ from .common import (
     send_voice,
 )
 from .registry import Routes
+from .tools import summarize_link
 
 log = logging.getLogger(__name__)
 router = Routes("chat")
@@ -44,6 +46,10 @@ async def on_text(message: Message, app: App, turn: Turn) -> None:
     text = strip_mention(message.text, app.bot_username) if turn.is_group else message.text
     if not text:
         await message.answer("Слушаю 🦊")
+        return
+    if app.settings.auto_summary and (url := only_link(text)):
+        # Прислали просто ссылку — пересказываем; короткая приписка становится вопросом
+        await summarize_link(message, app, turn, url, text.replace(url, "").strip())
         return
     await respond(message, app, turn, text)
 

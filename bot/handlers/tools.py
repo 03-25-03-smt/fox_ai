@@ -12,6 +12,17 @@ from ..assistant import Turn, format_search_results
 from ..formatting import split_markdown
 from ..llm import LLMError
 from ..services import ServiceError
+from ..summarize import (
+    MAX_CHUNKS,
+    SUMMARY_SYSTEM,
+    LinkError,
+    chunk_text,
+    fetch_transcript,
+    final_prompt,
+    find_urls,
+    fmt_duration,
+    part_prompt,
+)
 from ..timeparse import parse_reminder
 from ..web import WebError
 from .common import need_registered, respond
@@ -179,6 +190,58 @@ async def cmd_search(message: Message, command: CommandObject, app: App, turn: T
         "В конце перечисли использованные ссылки."
     )
     await respond(message, app, turn, prompt, store_text=f"/search {query}", extract_memory=False)
+
+
+# ---------------------------------------------------------------- пересказ ссылок
+
+
+async def summarize_link(message: Message, app: App, turn: Turn, url: str, question: str = "") -> None:
+    status = await message.answer("📖 Читаю…" if "youtu" not in url else "🎬 Достаю субтитры…")
+    try:
+        t = await fetch_transcript(url, app.assistant.web, app.youtube)
+    except (LinkError, WebError, ServiceError) as exc:
+        await status.edit_text(f"⚠️ Не получилось: {exc}")
+        return
+    chunks = chunk_text(t.text)[:MAX_CHUNKS]
+    head = f"📖 <b>{html.escape(t.title)}</b>\n<i>{html.escape(t.source)}"
+    if t.duration:
+        head += f", {fmt_duration(t.duration)}"
+    head += f", {len(t.text) // 1000 or 1} тыс. знаков</i>"
+    if len(chunks) == 1:
+        await status.edit_text(head, parse_mode=ParseMode.HTML)
+        body = chunks[0]
+    else:
+        notes = []
+        for i, part in enumerate(chunks, 1):
+            await status.edit_text(f"{head}\n\n⏳ Конспектирую часть {i}/{len(chunks)}…", parse_mode=ParseMode.HTML)
+            try:
+                async with app.queue.slot():
+                    notes.append(await app.llm.chat(app.settings.default_model, [
+                        {"role": "system", "content": SUMMARY_SYSTEM},
+                        {"role": "user", "content": part_prompt(t, part, i, len(chunks))},
+                    ], options={"temperature": 0.2}))
+            except LLMError as exc:
+                await status.edit_text(f"⚠️ Ошибка модели: {exc}")
+                return
+        await status.edit_text(head, parse_mode=ParseMode.HTML)
+        body = "\n\n".join(f"Часть {i}:\n{n.strip()}" for i, n in enumerate(notes, 1))
+    prompt = final_prompt(t, body, from_parts=len(chunks) > 1, question=question)
+    await respond(message, app, turn, prompt, store_text=f"Перескажи {url} {question}".strip(),
+                  allow_tools=False, extract_memory=False)
+
+
+@router.message(Command("sum", "tldr"))
+async def cmd_sum(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    args = command.args or ""
+    if message.reply_to_message:
+        args = f"{args} {message.reply_to_message.text or message.reply_to_message.caption or ''}"
+    urls = find_urls(args)
+    if not urls:
+        await message.answer("📖 Использование: /sum <ссылка> [вопрос] — пересказ статьи или YouTube.\n"
+                             "Можно просто прислать ссылку отдельным сообщением.")
+        return
+    question = args.replace(urls[0], "").strip() if command.args else ""
+    await summarize_link(message, app, turn, urls[0], question)
 
 
 # ---------------------------------------------------------------- Python

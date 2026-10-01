@@ -125,8 +125,8 @@ class WebTools:
             ))
         return results
 
-    async def fetch(self, url: str) -> tuple[str, str]:
-        """Скачивает страницу и возвращает (заголовок, текст)."""
+    async def fetch(self, url: str, max_chars: int = MAX_PAGE_CHARS) -> tuple[str, str]:
+        """Скачивает страницу и возвращает (заголовок, текст не длиннее max_chars)."""
         for _ in range(MAX_REDIRECTS + 1):
             await ensure_public_url(url)
             try:
@@ -151,5 +151,5 @@ class WebTools:
                 title, text = html_to_text(raw)
             else:
                 title, text = "", raw
-            return title, text[:MAX_PAGE_CHARS]
+            return title, text[:max_chars]
         raise WebError("Слишком много редиректов")

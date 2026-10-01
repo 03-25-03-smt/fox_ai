@@ -53,6 +53,9 @@ class Settings(BaseSettings):
 
     # --- Интернет ---
     searxng_url: str = ""  # пусто = интернет выключен
+    auto_summary: bool = True  # присланная одна ссылка -> пересказ
+    youtube_enabled: bool = True  # пересказ YouTube (yt-dlp)
+    youtube_cookies: str = ""  # путь к cookies.txt, если YouTube требует вход
     max_tool_steps: int = 3
 
     # --- Внешние сервисы (пусто = выключено) ---

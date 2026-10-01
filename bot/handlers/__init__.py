@@ -25,6 +25,7 @@ BOT_COMMANDS = [
     BotCommand(command="aq", description="Аквариум: задачи, статистика, советы"),
     BotCommand(command="search", description="Найти в интернете"),
     BotCommand(command="draw", description="Нарисовать картинку"),
+    BotCommand(command="sum", description="Пересказ ссылки или YouTube"),
     BotCommand(command="py", description="Посчитать / построить график на Python"),
     BotCommand(command="remind", description="Напоминание"),
     BotCommand(command="reminders", description="Мои напоминания"),

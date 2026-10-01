@@ -16,6 +16,7 @@ from .knowledge import KnowledgeBase
 from .llm import OllamaClient
 from .memory import MemoryStore
 from .services import ImageClient, SandboxClient, SpeechClient
+from .summarize import YouTube
 from .tasks import start_background
 from .web import WebTools
 
@@ -37,12 +38,14 @@ def build_app(settings: Settings, db: Database) -> App:
         intra = IntraClient(settings.intra_client_id, settings.intra_client_secret.get_secret_value())
     sandbox = SandboxClient(settings.sandbox_url) if settings.sandbox_url else None
     assistant.sandbox = sandbox
+    speech = SpeechClient(settings.speech_url) if settings.speech_url else None
     return App(
         settings=settings,
         db=db,
         assistant=assistant,
         sandbox=sandbox,
-        speech=SpeechClient(settings.speech_url) if settings.speech_url else None,
+        speech=speech,
+        youtube=YouTube(speech, settings.youtube_cookies) if settings.youtube_enabled else None,
         imagegen=ImageClient(settings.imagegen_url) if settings.imagegen_url else None,
         intra=intra,
         queue=GpuQueue(settings.max_concurrent),
