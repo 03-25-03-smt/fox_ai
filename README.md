@@ -200,33 +200,41 @@ GPU 1: NVIDIA GeForce GTX 1050 (UUID: ...)
 
 ```powershell
 copy .env.example .env
--join ((1..32) | % { '{0:x2}' -f (Get-Random -Max 256) })   # скопировать — это SEARXNG_SECRET
 mkdir B:\fox_ai_backups
 notepad .env
 ```
+
+Обязательно вписать только две строки — остальное можно оставить как есть:
 
 | Переменная | Что это |
 |---|---|
 | `BOT_TOKEN` | токен от BotFather |
 | `ADMIN_IDS` | твой Telegram ID |
-| `SEARXNG_SECRET` | строка из команды выше |
+| `SEARXNG_SECRET`, `GRAFANA_PASSWORD` | оставь `replace-me` — на шаге 10 скрипт сгенерирует их сам (пароль Grafana он покажет) |
 | `GPU_IMAGEGEN`, `GPU_SPEECH` | номера RTX 3070 и GTX 1050 из шага 7 |
 | `BACKUP_HOST_DIR` | `B:/fox_ai_backups` (прямые слэши) |
 | `INTRA_CLIENT_ID/SECRET` | необязательно: [приложение в интре](https://profile.intra.42.fr/oauth/applications) для `/42` |
 | `AQUARIUM_TANKS` | твои аквариумы, `Большой:85,Нано:5` (см. «Аквариумы») |
-| `GRAFANA_PASSWORD` | пароль Grafana (логин `admin`) |
 | `COMPOSE_PROFILES` | `monitoring,webui` — Grafana и Open WebUI; убери ненужное, чтобы не скачивать (~0,5 и ~4 ГБ) |
 
 ### 10. Запуск
 
+Одна команда (от администратора, из `H:\fox_ai`) делает всё сразу: дописывает в `.env`
+недостающие настройки и генерирует секреты, собирает и запускает контейнеры, регистрирует
+автозапуск («Fox AI» и «Fox AI Agent») и запускает агент для `/logs`, `/restart`, `/power`:
+
 ```powershell
-docker compose up -d --build     # первая сборка на HDD ~20–30 минут
-docker compose ps                # все сервисы Up
+# от администратора; первая сборка на HDD ~20–30 минут
+powershell -ExecutionPolicy Bypass -File windows\update.ps1 -NoPull
 docker compose logs -f bot       # ждём «Fox AI (@имя_бота) запущен», выход: Ctrl+C
 ```
 
-Температуры всех трёх карт для `/status` пишет на Windows отдельный скрипт
-(запусти в отдельном окне, пока не настроен автозапуск):
+Параметры: `-PowerLimit 200` (по умолчанию) — постоянный лимит мощности P100 в ваттах: тише и
+холоднее, −5–10 % скорости; `-PowerLimit 0` — заводские 250 Вт. `-NoLock` — не блокировать экран
+после автозапуска.
+
+Температуры всех трёх карт для `/status` пишет скрипт `gpu-stats.ps1` — он стартует сам вместе
+с автозапуском. До первой перезагрузки запусти его в отдельном окне:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows\gpu-stats.ps1
@@ -235,27 +243,18 @@ powershell -ExecutionPolicy Bypass -File windows\gpu-stats.ps1
 Не нужны голос или картинки — закомментируй сервисы `speech` / `imagegen`
 в `docker-compose.yml` и добавь в `.env` пустые `SPEECH_URL=` / `IMAGEGEN_URL=`.
 
-### 11. Автозапуск после перезагрузки
+### 11. Автовход после перезагрузки
 
 Docker Desktop и Ollama — программы пользователя: они стартуют только после входа
-в Windows. Для сервера:
+в Windows. Задачи автозапуска уже созданы на шаге 10; осталось включить автовход:
+[Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon)
+→ ввести свой пароль → Enable (пароль хранится зашифрованным). Для учётки Microsoft с PIN:
+сначала «Параметры» → «Учётные записи» → «Варианты входа» → выключить «Для повышения
+безопасности разрешите вход Windows Hello…».
 
-1. **Автовход**: [Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon)
-   → ввести свой пароль → Enable (пароль хранится зашифрованным).
-   Для учётки Microsoft с PIN: сначала «Параметры» → «Учётные записи» → «Варианты входа» →
-   выключить «Для повышения безопасности разрешите вход Windows Hello…».
-2. **Задачи автозапуска** (от администратора): «Fox AI» — Ollama → gpu-stats → Docker →
-   контейнеры, затем блокировка экрана; «Fox AI Agent» — агент для `/logs`, `/restart`,
-   `/power` с правами администратора (нужны для лимита мощности P100):
-
-```powershell
-# от администратора; -PowerLimit 200 — постоянный лимит P100 в ваттах (тише и холоднее, −5–10 % скорости)
-powershell -ExecutionPolicy Bypass -File windows\install-autostart.ps1 -Lock -PowerLimit 200
-Start-ScheduledTask -TaskName 'Fox AI Agent'   # запустить агент сразу, без перезагрузки
-```
-
-Проверить: перезагрузить ПК, через 3–5 минут написать боту `/status`.
-Лог запуска — `H:\fox_ai\data\start-fox.log`.
+Проверить: перезагрузить ПК, через 3–5 минут написать боту `/status` и `/ps`.
+Лог запуска — `H:\fox_ai\data\start-fox.log`. Задачи — в «Планировщике заданий»
+(`Get-ScheduledTask 'Fox AI*'`).
 
 ### 12. Первый запрос в Telegram
 
@@ -274,9 +273,9 @@ Start-ScheduledTask -TaskName 'Fox AI Agent'   # запустить агент �
 # Дать доступ другу (он пишет боту /start и присылает тебе свой ID)
 #   в Telegram: /adduser <id> Имя
 
-# Обновить бота
-git pull; docker compose up -d --build
-docker image prune -f; docker builder prune -f   # убрать старые образы, иначе копятся десятки ГБ
+# Обновить бота (от администратора): git pull, новые настройки в .env, пересборка, автозапуск и агент
+powershell -ExecutionPolicy Bypass -File windows\update.ps1
+docker builder prune -f   # иногда: кэш сборки тоже копит десятки ГБ
 
 # Новая модель — из Telegram: /pull qwen2.5:14b (с прогрессом), /rm <модель>, /bench — сравнить скорость
 ollama pull qwen2.5:14b
@@ -423,7 +422,7 @@ docker compose down
 
 ### Управление сервером из Telegram 🖥
 
-Только для админов. Работает через агент `windows\fox-agent.ps1` (задача «Fox AI Agent», шаг 11):
+Только для админов. Работает через агент `windows\fox-agent.ps1` (задача «Fox AI Agent», шаг 10):
 бот кладёт запрос в папку `data\host`, агент выполняет его и отвечает. Сетевого порта нет,
 Docker-сокет в контейнер не пробрасывается, агент знает только эти команды:
 
@@ -516,7 +515,7 @@ SDXL (первый `/draw` после 2 минут простоя — 1–2 ми
 
 ## Если что-то не работает
 
-**`/status`: «GPU: нет данных».** Не запущен `windows\gpu-stats.ps1` (шаг 10/11)
+**`/status`: «GPU: нет данных».** Не запущен `windows\gpu-stats.ps1` (шаг 10)
 или файл `data\gpu\gpu.csv` старше 3 минут.
 
 **Бот пишет, что модель недоступна / в логах `ConnectError` к `host.docker.internal`.**
@@ -558,7 +557,7 @@ diskpart
 
 **P100 греется выше 85 °C** — бот пришлёт предупреждение админам. С 80 °C он сам включает
 бережный режим (см. «Управление сервером»). Если не помогает — улучши обдув или поставь
-постоянный лимит: `/power 180` или `-PowerLimit 180` в `install-autostart.ps1`.
+постоянный лимит: `/power 180` или `update.ps1 -PowerLimit 180`.
 
 **`/logs`, `/restart`: «агент на Windows не запущен».** Проверь задачу: `Get-ScheduledTask 'Fox AI Agent'`,
 запусти: `Start-ScheduledTask 'Fox AI Agent'`. Вручную (от администратора, видно вывод):
