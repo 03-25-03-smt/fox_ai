@@ -119,9 +119,9 @@ async def build_status(app: App) -> str:
     s = app.settings
     lines = ["📊 <b>Fox AI — статус</b>", f"Аптайм: {_uptime(time.time() - app.started_at)}"]
 
-    gpus = await query_gpus()
+    gpus = await query_gpus(s.gpu_stats_file)
     if gpus is None:
-        lines.append("\n<b>GPU:</b> nvidia-smi недоступен")
+        lines.append("\n<b>GPU:</b> нет данных (nvidia-smi недоступен или не запущен windows/gpu-stats.ps1)")
     else:
         lines.append("\n<b>GPU:</b>")
         for g in gpus:

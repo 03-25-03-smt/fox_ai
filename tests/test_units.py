@@ -151,6 +151,32 @@ def test_parse_nvidia_smi():
     assert (rtx.index, rtx.memory_total, rtx.fan) == (1, 8192, 35)
 
 
+def test_gpu_stats_file(tmp_path):
+    import asyncio
+    import os
+    import time
+
+    from bot.gpu import query_gpus, read_stats_file
+
+    path = tmp_path / "gpu.csv"
+    assert read_stats_file(str(path)) is None  # файла ещё нет
+    # Как пишет PowerShell 5: BOM и CRLF
+    path.write_bytes("\ufeff0, Tesla P100-PCIE-16GB, 64, 90, 9000, 16384, 180.5, [N/A]\r\n"
+                     "1, NVIDIA GeForce RTX 3070, 50, 5, 700, 8192, 25.0, 30\r\n"
+                     "2, NVIDIA GeForce GTX 1050, 40, 0, 300, 2048, [N/A], 20\r\n".encode())
+    gpus = asyncio.run(query_gpus(str(path)))
+    assert [(g.index, g.name) for g in gpus] == [
+        (0, "Tesla P100-PCIE-16GB"), (1, "NVIDIA GeForce RTX 3070"), (2, "NVIDIA GeForce GTX 1050")]
+    assert (gpus[0].temperature, gpus[0].fan, gpus[2].power) == (64, None, None)
+
+    old = time.time() - 600
+    os.utime(path, (old, old))
+    assert read_stats_file(str(path)) is None  # скрипт на хосте остановился
+
+    path.write_text("")
+    assert read_stats_file(str(path)) is None
+
+
 # ---------------------------------------------------------------- проекты
 
 

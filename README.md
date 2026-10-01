@@ -2,151 +2,255 @@
 
 Telegram-бот на локальных LLM: помощник по коду и 42 (norminette, песочница, тесты,
 защита, интра), собеседник для друзей (рецепты, обсуждения), с памятью, интернетом,
-голосом, фото и генерацией картинок. Всё работает на своём железе через Docker.
+голосом, фото и генерацией картинок. Работает на своём железе под Windows.
 
 Идеи на будущее — в [future_updates.md](future_updates.md).
 
 ---
 
-## Установка с нуля (Ubuntu 22.04 / 24.04)
+## Как это устроено
 
-### 1. Обновить систему
-
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y git curl openssl
+```
+Windows 11
+├── Ollama (обычная программа Windows) ── Tesla P100 16 ГБ ── все LLM и эмбеддинги
+│     модели: L:\ollama (SSD 120 ГБ)
+└── Docker Desktop (WSL2), диск Docker: H:\ (HDD 1 ТБ)
+      ├── bot       Telegram-бот → Ollama через host.docker.internal:11434
+      ├── searxng   поиск в интернете
+      ├── sandbox   компиляция и запуск C-кода (без интернета)
+      ├── imagegen  /draw, SDXL-Turbo ──── RTX 3070 8 ГБ
+      └── speech    голосовые, Whisper ─── GTX 1050 2 ГБ
+бэкапы базы: B:\fox_ai_backups (HDD 500 ГБ)
 ```
 
-### 2. Драйвер NVIDIA
+Почему Ollama не в Docker: Windows держит Tesla P100 в режиме **TCC** (только вычисления),
+а WSL2 и Docker видят лишь карты в режиме WDDM. Нативному Ollama режим не важен,
+и модели он читает прямо с диска Windows, без потерь скорости.
 
-Ветка **580** — последняя, которая поддерживает Tesla P100 (Pascal), и подходит для RTX 3070.
+Каждая задача на своей карте, поэтому:
+- LLM не выгружается, когда кто-то рисует картинку или шлёт голосовое;
+- на RTX 3070 можно играть: бот на неё не претендует (кроме `/draw`);
+- 16 ГБ P100 хватает на `qwen2.5-coder:14b` и два параллельных чата.
 
-> Сейчас бот настроен на **одну RTX 3070** (`.env.example`). Пока нет охлаждения для P100 —
-> лучше вынуть её из компьютера: даже без нагрузки пассивная карта в корпусе греется.
-> Значения для P100 + 3070 подписаны в `.env.example` комментариями `P100:`.
+Диски:
 
-```bash
-sudo apt install -y nvidia-driver-580
-sudo reboot
-```
+| Диск | Буква | Что на нём |
+|---|---|---|
+| SATA SSD 256 ГБ | `C:` | Windows, программы |
+| NVMe 990 EVO Plus 1 ТБ | `D:` | игры (бот не трогает) |
+| SATA SSD 120 ГБ Samsung | `L:` | модели Ollama (~25–40 ГБ) |
+| HDD WD Green 1 ТБ | `H:` | Docker (образы, Whisper, SDXL, база бота), сам проект |
+| HDD WD Blue 500 ГБ | `B:` | бэкапы базы |
 
-После перезагрузки — обе карты должны быть видны:
+---
 
-```bash
+## Установка с нуля
+
+Команды — в **PowerShell**. «От администратора» = правой кнопкой по «Пуск» →
+«Терминал (администратор)».
+
+### 1. Железо и BIOS
+
+- ⚠️ **У P100 нет вентилятора.** Без направленного обдува (турбинка на 3D-печатном
+  переходнике или мощный корпусный вентилятор прямо в торец) она перегреется за минуты.
+  Не запускай бота, пока нет охлаждения.
+- Монитор — в **RTX 3070**. P100 выходов не имеет, 1050 пусть остаётся без монитора.
+- Блок питания: P100 250 Вт + 3070 220 Вт + 1050 75 Вт + процессор → нужен **850 Вт**.
+  У P100 питание EPS 8-pin (как у процессора), а не PCIe — нужен переходник
+  2× PCIe 8-pin → EPS 8-pin.
+- В BIOS включить **Above 4G Decoding** (без него P100 не определится) и **Resizable BAR**,
+  CSM выключить.
+
+### 2. Диски
+
+`Win+X` → «Управление дисками». Для каждого из трёх пустых дисков:
+инициализировать (GPT) → «Создать простой том» → NTFS → буква по таблице выше
+(`L:`, `H:`, `B:`). ⚠️ Убедись, что выбираешь пустые диски — форматирование стирает всё.
+
+### 3. Драйвер NVIDIA
+
+Все три карты должны работать от **одного** драйвера. P100 и GTX 1050 — Pascal,
+его поддерживает только ветка **R580** (последняя для Pascal); драйверы новее карты не увидят.
+
+1. Скачать [DDU](https://www.wagnardsoft.com/display-driver-uninstaller-DDU-) и снести
+   старые драйверы NVIDIA (в безопасном режиме, как DDU предлагает).
+2. Запретить Windows самой ставить драйверы: «Пуск» → «Изменение параметров установки
+   устройств» → **Нет**.
+3. Поставить драйвер (варианты по порядку, пока все три карты не заработают):
+   - **Data Center driver R580** для Windows 11: на [nvidia.com/drivers](https://www.nvidia.com/drivers)
+     выбрать Data Center / Tesla → P-Series → Tesla P100 → Windows 11 → ветка R580;
+   - **CUDA Toolkit 12.9** ([developer.nvidia.com/cuda-12-9-0-download-archive](https://developer.nvidia.com/cuda-12-9-0-download-archive))
+     с галочкой «Display Driver» — у него самый широкий список поддерживаемых карт;
+   - последний **Game Ready / Studio** драйвер ветки 580 (581.xx) для RTX 3070.
+4. Перезагрузить и проверить:
+
+```powershell
 nvidia-smi
-nvidia-smi -L   # номер RTX 3070 → GPU_MAIN и GPU_AUX в .env
 ```
 
-> ⚠️ У P100 нет своего вентилятора. Без направленного обдува она перегреется за минуты.
+Должны быть видны три карты. У P100 в колонке `TCC/WDDM` будет **TCC** — так и надо.
+Если какая-то карта с жёлтым значком в диспетчере устройств — попробуй следующий драйвер
+из списка; если не помогло — обнови BIOS материнской платы.
 
-### 3. Docker
+### 4. Питание и обновления
 
-```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-newgrp docker            # или перелогиниться
-sudo systemctl enable docker
-docker run --rm hello-world
+Это сервер — он не должен засыпать:
+
+```powershell
+# от администратора
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
 ```
 
-### 4. NVIDIA Container Toolkit (GPU внутри контейнеров)
+«Параметры» → «Центр обновления Windows» → «Дополнительные параметры» → «Период
+активности» — выставить часы, когда сервер можно перезагружать (например, днём, пока ты в 42).
 
-```bash
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt update && sudo apt install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
+### 5. Git и проект
 
-docker run --rm --gpus all ubuntu nvidia-smi   # проверка: видны обе карты
+Поставить [Git for Windows](https://git-scm.com/download/win) (все настройки по умолчанию), затем:
+
+```powershell
+cd H:\
+git clone https://github.com/03-25-03-smt/fox_ai.git
+cd H:\fox_ai
 ```
 
-### 5. Папки для моделей и бэкапов на HDD
+Все следующие команды — из `H:\fox_ai`.
 
-Модели весят 5–20 ГБ каждая, системного SSD на 120 ГБ не хватит.
+### 6. Ollama на P100
 
-```bash
-lsblk -f                                  # найти HDD, например /dev/sdb1
-sudo mkdir -p /mnt/hdd
-sudo mount /dev/sdb1 /mnt/hdd             # подставь свой раздел
-echo "UUID=$(sudo blkid -s UUID -o value /dev/sdb1) /mnt/hdd ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
-sudo mkdir -p /mnt/hdd/ollama /mnt/hdd/fox_ai_backups
-sudo chown -R 1000:1000 /mnt/hdd/fox_ai_backups
+1. Скачать и поставить [Ollama для Windows](https://ollama.com/download/windows).
+2. Настроить (модели на `L:\ollama`, только P100, 2 параллельных запроса):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\setup-ollama.ps1 -ModelsDir 'L:\ollama'
 ```
 
-> Если диск новый и без файловой системы — сначала `sudo mkfs.ext4 /dev/sdb1`
-> (⚠️ стирает всё на разделе). Когда появится NVMe — перенеси туда `/mnt/hdd/ollama`
-> и поменяй `OLLAMA_MODELS_DIR` в `.env`.
+3. **Открыть новое окно PowerShell** (чтобы подхватились переменные) и скачать модели (~25 ГБ):
 
-### 6. Telegram-бот
+```powershell
+ollama pull bge-m3              # эмбеддинги: память и база знаний (обязательно)
+ollama pull qwen2.5:7b          # основная модель
+ollama pull qwen2.5-coder:14b   # для кода и 42
+ollama pull qwen2.5:3b          # быстрая: короткие ответы, факты, резюме
+ollama pull qwen2.5vl:7b        # для фото
+```
+
+4. Проверить, что модель работает на P100:
+
+```powershell
+ollama run qwen2.5:7b "Привет!"
+ollama ps          # PROCESSOR: 100% GPU
+nvidia-smi         # память занята на Tesla P100
+```
+
+### 7. WSL2 и Docker Desktop
+
+```powershell
+# от администратора
+wsl --install --no-distribution
+```
+
+Перезагрузить. Поставить [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+(бэкенд WSL2). После установки в настройках Docker Desktop:
+
+- **Resources → Advanced → Disk image location** → `H:\DockerDesktop` → Apply.
+  Так образы (~20 ГБ), модели Whisper и SDXL (~10 ГБ) и база бота будут на HDD, а не на `C:`.
+- **General → Start Docker Desktop when you sign in** — включить.
+
+Ограничить память WSL (по умолчанию она может забрать половину RAM). Создать файл
+`%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+# при 32 ГБ RAM — 16GB, при 16 ГБ RAM — 10GB
+memory=16GB
+```
+
+и выполнить `wsl --shutdown`, затем снова запустить Docker Desktop.
+
+Проверить GPU в Docker:
+
+```powershell
+docker run --rm --gpus all ubuntu nvidia-smi -L
+```
+
+Здесь будут **две** карты (P100 в TCC не видна — так и задумано), например:
+
+```
+GPU 0: NVIDIA GeForce RTX 3070 (UUID: ...)
+GPU 1: NVIDIA GeForce GTX 1050 (UUID: ...)
+```
+
+Эти номера — для `GPU_IMAGEGEN` и `GPU_SPEECH` в `.env`. Номера в Docker
+**не совпадают** с номерами в `nvidia-smi` на Windows.
+
+### 8. Telegram-бот
 
 1. В [@BotFather](https://t.me/BotFather): `/newbot` → получить **токен**.
 2. Там же `/setprivacy` → выбрать бота → **Disable** (чтобы бот видел @упоминания в группах).
 3. Свой Telegram ID узнать у [@userinfobot](https://t.me/userinfobot).
 
-### 7. Скачать проект и настроить
+### 9. Настройка `.env`
 
-```bash
-git clone https://github.com/03-25-03-smt/fox_ai.git
-cd fox_ai
-cp .env.example .env
-openssl rand -hex 32        # скопировать — это SEARXNG_SECRET
-nano .env
+```powershell
+copy .env.example .env
+-join ((1..32) | % { '{0:x2}' -f (Get-Random -Max 256) })   # скопировать — это SEARXNG_SECRET
+mkdir B:\fox_ai_backups
+notepad .env
 ```
-
-Минимум, что заполнить в `.env`:
 
 | Переменная | Что это |
 |---|---|
 | `BOT_TOKEN` | токен от BotFather |
 | `ADMIN_IDS` | твой Telegram ID |
-| `SEARXNG_SECRET` | строка из `openssl rand -hex 32` |
-| `OLLAMA_MODELS_DIR` | `/mnt/hdd/ollama` |
-| `BACKUP_HOST_DIR` | `/mnt/hdd/fox_ai_backups` |
-| `GPU_MAIN`, `GPU_AUX` | номер RTX 3070 из `nvidia-smi -L` |
+| `SEARXNG_SECRET` | строка из команды выше |
+| `GPU_IMAGEGEN`, `GPU_SPEECH` | номера RTX 3070 и GTX 1050 из шага 7 |
+| `BACKUP_HOST_DIR` | `B:/fox_ai_backups` (прямые слэши) |
 | `INTRA_CLIENT_ID/SECRET` | необязательно: [приложение в интре](https://profile.intra.42.fr/oauth/applications) для `/42` |
 
-```bash
-mkdir -p data/bot data/models data/backups
+### 10. Запуск
+
+```powershell
+docker compose up -d --build     # первая сборка на HDD ~20–30 минут
+docker compose ps                # все сервисы Up
+docker compose logs -f bot       # ждём «Fox AI (@имя_бота) запущен», выход: Ctrl+C
 ```
 
-### 8. Запуск
+Температуры всех трёх карт для `/status` пишет на Windows отдельный скрипт
+(запусти в отдельном окне, пока не настроен автозапуск):
 
-```bash
-docker compose up -d --build     # первая сборка ~10–20 минут
-docker compose ps                # все сервисы должны быть Up
-docker compose logs -f bot       # ждём «Fox AI (@имя_бота) запущен», выход: Ctrl+C
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\gpu-stats.ps1
 ```
 
 Не нужны голос или картинки — закомментируй сервисы `speech` / `imagegen`
 в `docker-compose.yml` и добавь в `.env` пустые `SPEECH_URL=` / `IMAGEGEN_URL=`.
 
-### 9. Скачать модели
+### 11. Автозапуск после перезагрузки
 
-```bash
-docker compose exec ollama ollama pull bge-m3              # эмбеддинги: память и база знаний (обязательно)
-docker compose exec ollama ollama pull qwen2.5:7b          # основная модель
-docker compose exec ollama ollama pull qwen2.5-coder:7b    # для кода (на P100 — :14b)
-docker compose exec ollama ollama pull qwen2.5:3b          # быстрая: короткие ответы, факты, резюме
-docker compose exec ollama ollama pull qwen2.5vl:7b        # для фото
+Docker Desktop и Ollama — программы пользователя: они стартуют только после входа
+в Windows. Для сервера:
+
+1. **Автовход**: [Sysinternals Autologon](https://learn.microsoft.com/sysinternals/downloads/autologon)
+   → ввести свой пароль → Enable (пароль хранится зашифрованным).
+   Для учётки Microsoft с PIN: сначала «Параметры» → «Учётные записи» → «Варианты входа» →
+   выключить «Для повышения безопасности разрешите вход Windows Hello…».
+2. **Задача автозапуска** (Ollama → gpu-stats → Docker → контейнеры, затем блокировка экрана):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\install-autostart.ps1 -Lock
 ```
 
-Проверить, что модель работает на видеокарте (в колонке PROCESSOR должно быть `GPU`):
+Проверить: перезагрузить ПК, через 3–5 минут написать боту `/status`.
+Лог запуска — `H:\fox_ai\data\start-fox.log`.
 
-```bash
-docker compose exec ollama ollama run qwen2.5:7b "Привет!"
-docker compose exec ollama ollama ps
-```
-
-### 10. Первый запрос в Telegram
+### 12. Первый запрос в Telegram
 
 1. Открыть своего бота → `/start` — придёт список команд.
 2. `/reindex` — проиндексировать базу знаний (Norm 42).
-3. Написать: `Привет! Объясни, что такое указатель в C` — бот ответит, текст появляется по ходу генерации.
-4. `/status` — температура карт, загруженные модели, скорость.
+3. Написать: `Привет! Объясни, что такое указатель в C` — текст появляется по ходу генерации.
+4. `/status` — температура трёх карт, загруженные модели, скорость.
 
 Готово 🎉
 
@@ -154,79 +258,145 @@ docker compose exec ollama ollama ps
 
 ## Дальше
 
-```bash
+```powershell
 # Дать доступ другу (он пишет боту /start и присылает тебе свой ID)
 #   в Telegram: /adduser <id> Имя
 
 # Обновить бота
-git pull && docker compose up -d --build
+git pull; docker compose up -d --build
+docker image prune -f; docker builder prune -f   # убрать старые образы, иначе копятся десятки ГБ
+
+# Новая модель
+ollama pull qwen2.5:14b
 
 # Логи и перезапуск
 docker compose logs -f bot
 docker compose restart bot
 
-# Остановить всё
+# Остановить всё (Ollama остаётся в трее)
 docker compose down
 ```
 
 Что где:
 
-| Сервис | Зачем |
-|---|---|
-| `ollama` | LLM-модели на GPU |
-| `searxng` | поиск в интернете (без внешних API) |
-| `sandbox` | компиляция и запуск C-кода: `/run`, `/valgrind`, `/asan`, `/tests`, проверка проектов (без интернета) |
-| `speech` | голосовые сообщения (Whisper) и ответы голосом (Piper), сейчас на CPU |
-| `imagegen` | `/draw` — картинки (SDXL-Turbo); на одной 3070 на время рисования LLM выгружается |
-| `bot` | сам Telegram-бот |
+| Сервис | Где работает | Зачем |
+|---|---|---|
+| Ollama | Windows, P100 | все LLM-модели и эмбеддинги |
+| `searxng` | Docker | поиск в интернете (без внешних API) |
+| `sandbox` | Docker | `/run`, `/valgrind`, `/asan`, `/tests`, проверка проектов (без интернета) |
+| `speech` | Docker, GTX 1050 | голосовые (Whisper) и ответы голосом (Piper) |
+| `imagegen` | Docker, RTX 3070 | `/draw` — картинки (SDXL-Turbo) |
+| `bot` | Docker | сам Telegram-бот |
 
-В папку `knowledge/` можно положить PDF Norm и subjects — бот будет на них опираться
+В папку `knowledge\` можно положить PDF Norm и subjects — бот будет на них опираться
 в режиме «42 / код» (после `/reindex`).
 
-## Разработка
+Бэкап базы — каждую ночь в `B:\fox_ai_backups`. Сама база живёт в томе Docker
+`fox_ai_bot_data` (на `H:`), руками её трогать не нужно.
 
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q
-```
+### Игры и бот одновременно
+
+LLM и голос на своих картах и играм не мешают. Мешать может только `/draw`: SDXL займёт
+до 6–7 ГБ на RTX 3070. Перед тяжёлой игрой: `docker compose stop imagegen`, после —
+`docker compose start imagegen` (пока сервис остановлен, `/draw` ответит ошибкой).
 
 ---
 
-## Чего ожидать по скорости (одна RTX 3070)
+## Чего ожидать по скорости
 
 Оценки, не замеры; реальная скорость — в `/status`. Модели в Q4 (по умолчанию в Ollama),
 ответ стримится — первые слова примерно через 1 с.
 
-| Модель | ток/с |
+| Модель на P100 | ток/с |
 |---|---|
-| `qwen2.5:3b` | ~110–150 |
-| `qwen2.5:7b`, `qwen2.5-coder:7b` | ~55–70 |
-| `qwen2.5vl:7b` | ~40–55 |
+| `qwen2.5:3b` | ~70–90 |
+| `qwen2.5:7b` | ~40–50 |
+| `qwen2.5vl:7b` | ~30–40 |
+| `qwen2.5-coder:14b` | ~22–28 |
+
+P100 по токенам немного медленнее RTX 3070 на 7b, зато в 16 ГБ влезают 14b-модели
+и несколько моделей сразу — без постоянных выгрузок.
 
 | Задача | Время |
 |---|---|
 | Короткий ответ | 1–3 с |
-| Обычный ответ (400–600 токенов) | 7–12 с |
-| Режим 42 / код с выдержками из Norm | 10–20 с |
-| `.c` → norminette + объяснение | 10–20 с |
-| `/run`, `/asan` / `/valgrind` | 1–3 с / 3–10 с (+10–20 с разбор ошибок) |
-| `/tests` | 40–70 с |
-| Проверка проекта | 10–40 с (+15–25 с разбор) |
-| Вопрос с поиском в интернете | 15–40 с |
-| Голосовое 10–20 с (Whisper на CPU) | +2–5 с к ответу |
+| Обычный ответ (400–600 токенов) | 10–15 с |
+| Режим 42 / код (14b) с выдержками из Norm | 20–30 с |
+| `.c` → norminette + объяснение | 15–30 с |
+| `/run`, `/asan` / `/valgrind` | 1–3 с / 3–10 с (+15–25 с разбор ошибок) |
+| `/tests` | 60–90 с |
+| Вопрос с поиском в интернете | 20–45 с |
+| Голосовое 10–20 с (Whisper на 1050) | +2–4 с к ответу |
 | Фото | 10–20 с |
-| `/draw` | 15–30 с (первый раз 1,5–3 мин) |
+| `/draw` | 5–15 с (первый раз после простоя 1–2 мин) |
 
-**Загрузка моделей — главный тормоз.** С HDD первая загрузка 7b-модели — 30–50 с,
-SDXL-Turbo — 1–1,5 мин. Потом файл лежит в RAM и грузится за 3–6 с. После 10 минут
-простоя модель выгружается из VRAM. С NVMe первая загрузка — 2–5 с.
+**Откуда грузятся модели — что это меняет.** Скорость генерации от диска не зависит:
+модель работает из видеопамяти. Диск влияет только на загрузку:
 
-**Чтобы не было лишних переключений моделей на 8 ГБ** (в VRAM помещаются только
-7b + эмбеддинги, а фоновая 3b для фактов вытесняет 7b), поставь в `.env`:
+| | SATA SSD (`L:`) | HDD (`H:`) |
+|---|---|---|
+| Первая загрузка 7b (4,7 ГБ) | ~10 с | 30–50 с |
+| Первая загрузка 14b (9 ГБ) | ~20 с | 60–90 с |
+| Повторно (файл в кэше RAM) | 3–5 с | 3–5 с |
 
-```bash
-MEMORY_MODEL=qwen2.5:7b   # факты и резюме той же моделью
-FAST_MODEL=               # короткие реплики тоже на 7b
-# если режим 42 нужен постоянно — одна модель на всё:
-# DEFAULT_MODEL=qwen2.5-coder:7b
+Поэтому LLM — на SSD 120 ГБ, а на HDD то, что грузится редко: образы Docker,
+SDXL (первый `/draw` после 2 минут простоя — 1–2 мин), Whisper. Модель держится
+в VRAM 30 минут после последнего запроса (`-KeepAlive` в `setup-ollama.ps1`;
+`-KeepAlive '-1'` — не выгружать никогда).
+
+---
+
+## Если что-то не работает
+
+**`/status`: «GPU: нет данных».** Не запущен `windows\gpu-stats.ps1` (шаг 10/11)
+или файл `data\gpu\gpu.csv` старше 3 минут.
+
+**Бот пишет, что модель недоступна / в логах `ConnectError` к `host.docker.internal`.**
+Проверить, что Ollama запущен (значок ламы в трее) и доступен из Docker:
+
+```powershell
+docker compose exec bot python -c "import urllib.request as u; print(u.urlopen('http://host.docker.internal:11434/api/version').read())"
+```
+
+Если не отвечает — пусть Ollama слушает все интерфейсы, а брандмауэр пускает
+только Docker (от администратора):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\setup-ollama.ps1 -ModelsDir 'L:\ollama' -ListenAll
+```
+
+**`ollama ps` показывает CPU вместо GPU.** Ollama не видит P100: проверить `nvidia-smi`,
+перезапустить `setup-ollama.ps1` (он ищет карту по имени `P100`) и открыть новое окно PowerShell.
+
+**Голосовые не распознаются (`speech` падает с CUDA-ошибкой на GTX 1050).**
+В `.env`: `WHISPER_DEVICE=cpu`, `WHISPER_MODEL=small`, затем `docker compose up -d speech`.
+
+**Кончается место на `H:`.** `docker system df` — сколько занимают образы и кэш;
+`docker image prune -f` и `docker builder prune -af` удаляют только ненужное.
+Файл диска Docker после чистки сам не уменьшается. Сжать его (от администратора):
+
+```powershell
+docker compose down; wsl --shutdown
+diskpart
+# в diskpart (путь — из Docker Desktop → Resources → Advanced → Disk image location):
+#   select vdisk file="H:\DockerDesktop\DockerDesktopWSL\disk\docker_data.vhdx"
+#   attach vdisk readonly
+#   compact vdisk
+#   detach vdisk
+#   exit
+```
+
+⚠️ Кнопка **Clean / Purge data** в Docker Desktop → Troubleshoot стирает всё, включая базу бота.
+
+**P100 греется выше 85 °C** — бот пришлёт предупреждение админам. Улучши обдув или
+ограничь мощность (от администратора): `nvidia-smi -i <номер P100> -pl 180`.
+
+---
+
+## Разработка
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest -q
 ```

@@ -337,7 +337,7 @@ async def test_status(env, monkeypatch):
     from bot.gpu import GpuInfo
     from bot.handlers import admin
 
-    async def fake_gpus():
+    async def fake_gpus(stats_file=""):
         return [GpuInfo(0, "Tesla P100-PCIE-16GB", 88, 95, 15000, 16384, 240.0, None),
                 GpuInfo(1, "NVIDIA GeForce RTX 3070", 60, 10, 2000, 8192, 50.0, 40)]
 
@@ -355,7 +355,7 @@ async def test_status(env, monkeypatch):
 async def test_gpu_alert(env, monkeypatch):
     from bot.gpu import GpuInfo
 
-    async def hot():
+    async def hot(stats_file=""):
         return [GpuInfo(0, "Tesla P100", 91, 100, 1, 2, None, None)]
 
     monkeypatch.setattr(tasks, "query_gpus", hot)

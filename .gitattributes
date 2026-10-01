@@ -1,0 +1,4 @@
+# Всё, что попадает в Linux-контейнеры, — с LF даже при клоне на Windows
+* text=auto eol=lf
+# Скрипты PowerShell — CRLF (и UTF-8 с BOM, иначе Windows PowerShell 5.1 ломает кириллицу)
+*.ps1 text eol=crlf

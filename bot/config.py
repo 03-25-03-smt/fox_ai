@@ -73,6 +73,8 @@ class Settings(BaseSettings):
 
     # --- Мониторинг и бэкапы ---
     gpu_temp_alert: int = 85  # °C, выше — предупреждение админам
+    # Снимок nvidia-smi, который пишет хост (windows/gpu-stats.ps1); пусто = звать nvidia-smi
+    gpu_stats_file: str = ""
     backup_dir: str = ""  # пусто = бэкапы выключены
     backup_keep: int = 14
     backup_hour: int = 4

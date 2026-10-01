@@ -62,7 +62,7 @@ async def deliver_reminders(bot: Bot, app: App, now: datetime.datetime | None = 
 
 
 async def check_gpu_temperature(bot: Bot, app: App) -> bool:
-    gpus = await query_gpus()
+    gpus = await query_gpus(app.settings.gpu_stats_file)
     if not gpus:
         return False
     limit = app.settings.gpu_temp_alert
