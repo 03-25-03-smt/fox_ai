@@ -77,9 +77,6 @@ def setup(env_path: Path, example_path: Path, gpus: list[tuple[str, str]]) -> li
             else:
                 problems.append(f"{key}: карта «{names[key]}» не найдена в nvidia-smi — впиши UUID вручную "
                                 f"(nvidia-smi -L) или закомментируй сервис в docker-compose.yml")
-        elif key in names and "#" in val:
-            # Старый .env с Windows: «GPU_IMAGEGEN=0    # номер RTX 3070» — номера там были другие
-            problems.append(f"{key}={val}: замени на {key}=auto (комментарий в строке значения — тоже убери)")
 
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     token = value(lines, "BOT_TOKEN") or ""

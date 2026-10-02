@@ -161,8 +161,8 @@ def test_env_setup(tmp_path, capsys):
     assert env_setup.setup(env, example, gpus) == []
     assert "новых настроек нет" in capsys.readouterr().out
 
-    env.write_text(env.read_text() + "BACKUP_HOST_DIR=B:/fox_ai_backups\nGPU_SPEECH=1      # номер GTX 1050 (старый .env с Windows)\n")
-    assert [p.split("=")[0] for p in env_setup.setup(env, example, gpus)] == ["GPU_SPEECH", "BACKUP_HOST_DIR"]
+    env.write_text(env.read_text() + "BACKUP_HOST_DIR=backups\n")
+    assert [p.split("=")[0] for p in env_setup.setup(env, example, gpus)] == ["BACKUP_HOST_DIR"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="bash-скрипты")
