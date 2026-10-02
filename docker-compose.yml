@@ -1,9 +1,9 @@
-# Fox AI на Linux (Ubuntu 24.04): всё в Docker, у каждой задачи своя карта.
+# Fox AI на Linux (Ubuntu 24.04): всё в Docker, LLM — на своей карте.
 #   ollama   → Tesla P100 (GPU_LLM)      все LLM и эмбеддинги
 #   imagegen → RTX 3070  (GPU_IMAGEGEN) /draw
-#   speech   → GTX 1050  (GPU_SPEECH)   Whisper
+#   speech   → RTX 3070  (GPU_SPEECH)   Whisper; ~1 ГБ, выгружается через 10 минут простоя
 # Карты задаются UUID (GPU-…) или номером из `nvidia-smi -L`; linux/install.sh сам находит их
-# по имени и вписывает UUID в .env. Контейнер видит только свою карту.
+# по имени и вписывает UUID в .env. Контейнер видит только свои карты.
 #
 # Сервисы speech и imagegen необязательные: закомментируй их и поставь в .env
 # пустые SPEECH_URL= / IMAGEGEN_URL=.
@@ -88,14 +88,14 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["${GPU_SPEECH:?задай GPU_SPEECH в .env (UUID GTX 1050; linux/install.sh найдёт сам)}"]
+              device_ids: ["${GPU_SPEECH:?задай GPU_SPEECH в .env (UUID RTX 3070; linux/install.sh найдёт сам)}"]
               capabilities: [gpu]
     volumes:
       - models:/models
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
-      - WHISPER_COMPUTE=${WHISPER_COMPUTE:-int8}
+      - WHISPER_COMPUTE=${WHISPER_COMPUTE:-int8_float16}
 
   imagegen:
     build: ./services/imagegen
@@ -129,7 +129,7 @@ services:
       - DB_PATH=/app/data/fox_ai.sqlite3
       - KNOWLEDGE_DIR=/app/knowledge
       - BACKUP_DIR=/app/backups
-      # Температуры всех трёх карт пишет агент на хосте (linux/fox-agent.py): бот GPU не видит
+      # Температуры всех карт пишет агент на хосте (linux/fox-agent.py): бот GPU не видит
       - GPU_STATS_FILE=/app/gpu/gpu.csv
       # /metrics для Prometheus — только внутри docker-сети, наружу порт не публикуется
       - METRICS_PORT=9101

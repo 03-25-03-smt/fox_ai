@@ -20,7 +20,7 @@ from pathlib import Path
 KEY_RE = re.compile(r"^\s*([A-Z0-9_]+)\s*=")
 SKIP = {"BOT_TOKEN", "ADMIN_IDS"}  # их задаёшь сам, пример не подставляем
 # Переменная → какую карту искать (часть имени). Для LLM имя берётся из LLM_GPU_NAME
-GPU_VARS = {"GPU_LLM": "P100", "GPU_IMAGEGEN": "3070", "GPU_SPEECH": "1050"}
+GPU_VARS = {"GPU_LLM": "P100", "GPU_IMAGEGEN": "3070", "GPU_SPEECH": "3070"}
 
 
 def list_gpus() -> list[tuple[str, str]]:
