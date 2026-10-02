@@ -161,10 +161,10 @@ class Env:
         await self.feed(message=msg)
         return msg
 
-    async def send_voice(self, uid: int, audio: bytes = b"ogg") -> None:
+    async def send_voice(self, uid: int, audio: bytes = b"ogg", reply_to: Message | None = None) -> None:
         self.session.files["voice1"] = audio
         voice = Voice(file_id="voice1", file_unique_id="v", duration=2, file_size=len(audio))
-        await self.feed(message=self.message(uid, voice=voice))
+        await self.feed(message=self.message(uid, voice=voice, reply_to_message=reply_to))
 
     async def send_photo(self, uid: int, caption: str | None = None) -> None:
         self.session.files["photo1"] = b"\xff\xd8jpeg"

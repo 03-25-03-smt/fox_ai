@@ -396,3 +396,119 @@ async def test_reading_text(env):
     assert "уже в словаре" in last_text(env)
     await env.send(ADMIN, "Anna kauft Brot.")  # ответ на вопрос — текст есть в истории
     assert any("Im Supermarkt" in m["content"] for m in env.llm.calls[-1]["messages"])
+
+
+# ---------------------------------------------------------------- экспорт / импорт словаря
+
+
+def test_parse_import_formats():
+    from bot.lang import parse_import
+
+    rows, skipped = parse_import("1. der Hund — собака\n- Katze\nlaufen; бегать, идти\n# комментарий\n\n"
+                                 "Tisch\tстол\n" + "x" * 150, "de")
+    assert [(r.word, r.translation) for r in rows] == [
+        ("der Hund", "собака"), ("Katze", ""), ("laufen", "бегать, идти"), ("Tisch", "стол")]
+    assert skipped == 1
+    csv_text = ("\ufefflang;word;translation;topic\ncs;pes;собака;животные\nxx;Haus;дом;\n")
+    rows, _ = parse_import(csv_text, "de")
+    assert [(r.lang, r.word, r.translation, r.entry()["topic"]) for r in rows] == [
+        ("cs", "pes", "собака", "животные"), ("de", "Haus", "дом", "другое")]
+
+
+async def test_export_import_roundtrip(env):
+    from aiogram.methods import SendDocument
+
+    store = env.assistant.lang
+    await env.db.add_user(ADMIN)
+    await env.send(ADMIN, "/wexport")
+    assert "пуст" in env.last_text()
+    await store.add_word(ADMIN, dict(HUND, topic="животные"), "2026-01-01")
+    await store.add_word(ADMIN, entry("pes", "собака", "cs"), "2026-01-01")
+    await env.send(ADMIN, "/wexport")
+    doc = env.session.of_type(SendDocument)[-1].document
+    assert doc.filename.endswith(".csv") and doc.data.startswith(b"\xef\xbb\xbf")
+    text = doc.data.decode("utf-8-sig")
+    assert "der Hund,собака" in text and "Der Hund schläft. — Собака спит." in text and "cs,pes" in text
+    await env.send(ADMIN, "/wexport cs")
+    assert b"der Hund" not in env.session.of_type(SendDocument)[-1].document.data
+
+    # Файл без команды — не импорт: идёт в обычную обработку файлов
+    await env.send_file(ADMIN, "slovar.csv", doc.data)
+    assert "Импорт" not in last_text(env)
+
+    # Импорт обратно в «чистый» словарь: всё восстанавливается, дубли не появляются
+    for w in await store.list_words(ADMIN, "de") + await store.list_words(ADMIN, "cs"):
+        await store.delete_word(ADMIN, w.id)
+    await env.send_file(ADMIN, "slovar.csv", doc.data, caption="/wimport")
+    assert "добавлено <b>2</b>" in str(env.session.requests[-1])
+    (hund,) = await store.list_words(ADMIN, "de")
+    assert (hund.word, hund.topic, hund.examples[0]["ru"]) == ("der Hund", "животные", "Собака спит.")
+    await env.send_file(ADMIN, "slovar.csv", doc.data, caption="/wimport")
+    assert "Уже были в словаре: 2" in str(env.session.requests[-1])
+
+
+async def test_import_list_with_lookup(env):
+    store = env.assistant.lang
+    await env.db.add_user(ADMIN)
+    await env.send(ADMIN, "/wimport cs")
+    assert "Импорт слов" in env.last_text() and ADMIN in store.pending
+    env.llm.scripted.append(("«kočka»", json.dumps(
+        {"lang": "cs", "word": "kočka", "translation": "кошка", "topic": "животные",
+         "examples": [{"text": "Kočka spí.", "ru": "Кошка спит."}]})))
+    await env.send(ADMIN, "pes — собака\nkočka")  # следующее сообщение после /wimport
+    assert "добавлено <b>2</b>" in str(env.session.requests[-1])
+    assert ADMIN not in store.pending
+    words = {w.word: w for w in await store.list_words(ADMIN, "cs")}
+    assert words["kočka"].examples[0]["text"] == "Kočka spí." and words["pes"].translation == "собака"
+
+    await env.send(ADMIN, "/wimport de\nder Tisch — стол")  # всё в одном сообщении
+    assert [w.word for w in await store.list_words(ADMIN, "de")] == ["der Tisch"]
+    await env.send(ADMIN, "/wimport")
+    await env.send(ADMIN, "/cancel")
+    assert "отменён" in env.last_text() and ADMIN not in store.pending
+    await env.send(FRIEND, "/wimport de\nder Hund — собака")
+    assert "только владельцу" in env.last_text()
+
+
+# ---------------------------------------------------------------- диктант
+
+
+def test_check_dictation():
+    from bot.lang import check_dictation
+
+    perfect = check_dictation("Der Hund läuft schnell.", "der hund lauft, schnell")
+    assert perfect.score == 25
+    assert [(m.kind, m.typed, m.expected) for m in perfect.mistakes] == [
+        ("регистр", "der", "Der"), ("регистр", "hund", "Hund"), ("диакритика", "lauft", "läuft")]
+    check = check_dictation("Já mám velký dům", "Ja mam velky dum doma")
+    assert {m.kind for m in check.mistakes} == {"диакритика", "лишнее"}
+    check = check_dictation("Ich wohne in Prag", "Ich wone Prag")
+    assert [(m.kind, m.expected) for m in check.mistakes] == [("орфография", "wohne"), ("пропущено", "in")]
+    assert check_dictation("Guten Morgen!", "Guten Morgen").score == 100
+
+
+async def test_dictation_flow(env):
+    store = env.assistant.lang
+    await env.db.add_user(ADMIN)
+    env.llm.scripted.append(("для диктанта", json.dumps({"text": "Die Straße ist lang.", "ru": "Улица длинная."})))
+    await env.send(ADMIN, "/dictation de")
+    texts = " ".join(env.texts())
+    assert "Диктант" in texts and "Die Straße ist lang." not in texts  # фраза только голосом
+    assert env.speech.synthesized[-1] == "Die Straße ist lang." and env.speech.voices[-1] == "de"
+    await env.click(ADMIN, "ld:again")
+    assert len(env.speech.synthesized) == 2
+
+    await env.send(ADMIN, "die strasse ist lang")
+    report = env.last_text()
+    assert "Die Straße ist lang." in report and "50%" in report and "Улица длинная." in report
+    assert "strasse" in report and "регистр" in report
+    assert ADMIN not in store.pending
+    await env.send(ADMIN, "просто сообщение")  # после проверки — снова обычный чат
+    assert "Правильно" not in env.last_text()
+
+    env.llm.scripted.append(("для диктанта", json.dumps({"text": "Wir gehen nach Hause.", "ru": ""})))
+    await env.click(ADMIN, "ld:next:de")
+    await env.click(ADMIN, "ld:show")
+    assert "Wir gehen nach Hause." in env.last_text() and ADMIN not in store.pending
+    await env.click(ADMIN, "ld:next:de")  # модель не ответила JSON и своих слов нет
+    assert "Не получилось" in env.last_text()

@@ -312,6 +312,33 @@ async def test_question_buttons(aq_env):
     assert (await env.brain.get_question(q2))[5] == -1
 
 
+async def test_question_voice_answer(aq_env):
+    env = aq_env
+    await env.send(ADMIN, "/aqask")
+    (q, msg_id) = await env.db._fetchone("SELECT id, tg_msg_id FROM aq_questions")
+    assert "голосовым" in to_owner(env)[-1].text
+    env.speech.text = "живут десять неонов и два сомика"
+    env.llm.scripted.append(("Вопрос агента", json.dumps(
+        {"facts": [{"topic": "fish", "text": "Неонов 10, сомиков 2"}], "outdated": []})))
+    asked = env.message(ADMIN, text="вопрос").model_copy(update={"message_id": msg_id})
+    await env.send_voice(ADMIN, reply_to=asked)  # голосовое reply на вопрос
+    assert [f.text for f in await env.brain.facts(env.big.id, "fish")] == ["Неонов 10, сомиков 2"]
+    assert "живут десять неонов" in env.last_user_prompt()
+    assert (await env.brain.get_question(q))[5] != 0  # вопрос закрыт
+
+    await env.send(ADMIN, "/aqask")  # через кнопку «Ответить» — тоже голосом
+    (q2,) = await env.db._fetchone("SELECT id FROM aq_questions ORDER BY id DESC")
+    await env.click(ADMIN, f"aqq:answer:{q2}")
+    assert "голосовое" in env.last_text()
+    env.speech.text = ""
+    await env.send_voice(ADMIN)
+    assert "Не расслышал" in str(env.session.requests[-1])
+    assert (await env.brain.get_question(q2))[5] == 0  # вопрос ещё открыт
+    env.llm.scripted.append(("Вопрос агента", json.dumps({"facts": [], "outdated": []})))
+    await env.send(ADMIN, "фильтр внешний")  # можно ответить текстом
+    assert (await env.brain.get_question(q2))[5] != 0
+
+
 async def test_tank_commands(aq_env):
     env = aq_env
     await env.send(ADMIN, "/tank add 5 фильтр-губка от компрессора")  # модель ничего не извлекла

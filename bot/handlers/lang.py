@@ -1,4 +1,4 @@
-"""Учитель языков: /w /dict /quiz /lesson /test /talk /speak /lang.
+"""Учитель языков: /w /dict /wexport /wimport /quiz /lesson /test /talk /speak /dictation /lang.
 
 Доступно пользователям из LANG_USER_IDS (по умолчанию — админам): словарь личный.
 """
@@ -23,14 +23,21 @@ from ..assistant import Turn
 from ..lang import (
     LANGS,
     LEVELS,
+    MAX_IMPORT,
+    MAX_IMPORT_LOOKUP,
     TOPICS,
+    DictationCheck,
     LangStore,
     Pending,
     QuizSession,
     Word,
+    check_dictation,
     compare_speech,
+    dictation_messages,
+    export_csv,
     first_letter,
     lookup_messages,
+    parse_import,
     parse_lang,
     parse_lookup,
     parse_phrase,
@@ -52,10 +59,12 @@ CB_WORD = "lw:"  # lw:<действие>:<id слова>
 CB_QUIZ = "lq:"  # lq:a:<вариант> · lq:stop · lq:daily
 CB_SPEAK = "ls:"  # ls:next:<язык> · ls:stop
 CB_READ = "lr:"  # lr:ru · lr:add · lr:tts · lr:more
+CB_DICT = "ld:"  # ld:again · ld:next:<язык> · ld:show · ld:stop
 QUIZ_DEFAULT = 10
 QUIZ_MAX = 30
 DICT_CHUNK = 3500
 MAX_VOICE_BYTES = 20 * 1024 * 1024
+MAX_IMPORT_BYTES = 1024 * 1024
 
 
 # ---------------------------------------------------------------- общее
@@ -237,6 +246,158 @@ async def cmd_wdel(message: Message, command: CommandObject, app: App, turn: Tur
         return
     ok = await _store(app).delete_word(turn.user_id, int(arg))
     await message.answer("🗑 Удалил из словаря" if ok else "Нет такого слова, см. /dict")
+
+
+# ---------------------------------------------------------------- экспорт и импорт словаря
+
+
+@router.message(Command("wexport"))
+async def cmd_wexport(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    arg = (command.args or "").strip()
+    lang = parse_lang(arg)
+    if arg and lang is None:
+        await message.answer("Использование: /wexport — весь словарь · /wexport de · /wexport cs")
+        return
+    words = []
+    for code in [lang] if lang else list(LANGS):
+        words += await _store(app).list_words(turn.user_id, code)
+    if not words:
+        await message.answer("📚 Словарь пуст — экспортировать нечего. Добавь слово: /w Hund")
+        return
+    name = f"slovar-{lang or 'all'}-{_today(app, turn)}.csv"
+    await message.answer_document(
+        BufferedInputFile(export_csv(words), name),
+        caption=f"📤 Словарь: {len(words)} сл. Открывается в Excel / LibreOffice / Google Таблицах. "
+                "Вернуть обратно или на другой аккаунт: /wimport с этим файлом.",
+    )
+
+
+def _import_args(args: str | None) -> tuple[str | None, str]:
+    """«de\nHund — собака» → ("de", "Hund — собака"); язык — только первым словом."""
+    parts = (args or "").strip().split(None, 1)
+    if parts and (lang := parse_lang(parts[0])):
+        return lang, parts[1] if len(parts) > 1 else ""
+    return None, (args or "").strip()
+
+
+IMPORT_HELP = (
+    "📥 <b>Импорт слов в словарь</b>\n"
+    "Пришли следующим сообщением список — по слову на строку, перевод через «—», «;», «=» или Tab "
+    "(без перевода — переведу сам и добавлю примеры, до {lookup} слов за раз):\n"
+    "<code>der Hund — собака\nKatze\nlaufen; бегать</code>\n"
+    "или файл <b>.csv / .txt</b> (например, из /wexport). Язык: {flag} {name} "
+    "(другой — /wimport cs). Отменить: /cancel"
+)
+
+
+@router.message(Command("wimport"))
+async def cmd_wimport(message: Message, command: CommandObject, bot: Bot, app: App, turn: Turn) -> None:
+    """Импорт только этой командой: список в том же сообщении, файл с подписью /wimport или следующим сообщением."""
+    if not await need_lang(message, app, turn):
+        return
+    store = _store(app)
+    forced, body = _import_args(command.args)
+    lang = forced or (await store.get_state(turn.user_id)).current
+    if message.document:
+        if (text := await _read_import_file(message, bot)) is not None:
+            await run_import(message, app, turn, text, lang)
+        return
+    if body:
+        await run_import(message, app, turn, body, lang)
+        return
+    store.pending[turn.user_id] = Pending("import", lang, "")
+    await message.answer(IMPORT_HELP.format(lookup=MAX_IMPORT_LOOKUP, flag=LANGS[lang].flag, name=LANGS[lang].name),
+                         parse_mode=ParseMode.HTML)
+
+
+async def _read_import_file(message: Message, bot: Bot) -> str | None:
+    doc = message.document
+    if not (doc.file_name or "").lower().endswith((".csv", ".txt", ".tsv")):
+        await message.answer("Импортирую только .csv, .tsv и .txt")
+        return None
+    if (doc.file_size or 0) > MAX_IMPORT_BYTES:
+        await message.answer("Файл больше 1 МБ — раздели его на части.")
+        return None
+    raw = (await bot.download(doc)).read()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1251", errors="replace")  # CSV из русского Excel
+
+
+async def pending_import(message: Message, app: App) -> bool:
+    return await _has_pending(message, app, "import")
+
+
+@router.message(Command("cancel"), pending_import)
+async def cancel_import(message: Message, app: App, turn: Turn) -> None:
+    _store(app).pending.pop(turn.user_id, None)
+    await message.answer("👌 Импорт отменён.")
+
+
+@router.message(F.document, pending_import)
+async def on_import_file(message: Message, bot: Bot, app: App, turn: Turn) -> None:
+    pending = _store(app).pending.pop(turn.user_id)
+    if (text := await _read_import_file(message, bot)) is not None:
+        await run_import(message, app, turn, text, pending.lang)
+
+
+@router.message(F.text & ~F.text.startswith("/"), pending_import)
+async def on_import_text(message: Message, app: App, turn: Turn) -> None:
+    pending = _store(app).pending.pop(turn.user_id)
+    await run_import(message, app, turn, message.text, pending.lang)
+
+
+async def run_import(message: Message, app: App, turn: Turn, text: str, lang: str) -> None:
+    store = _store(app)
+    rows, skipped = parse_import(text, lang)
+    if not rows:
+        await message.answer("Не нашёл слов. Формат: по слову на строку, перевод через «—» (или файл из /wexport).")
+        return
+    today = _today(app, turn)
+    status = await message.answer(f"📥 Импортирую {len(rows)} сл.…")
+    added = existing = failed = lookups = 0
+    no_translation = [i for i, r in enumerate(rows) if not r.translation]
+    too_many = set(no_translation[MAX_IMPORT_LOOKUP:])  # индексы: одинаковые строки — тоже разные слова
+    for i, row in enumerate(rows):
+        if i in too_many:
+            continue
+        if await store.find_word(turn.user_id, row.lang, row.word):
+            existing += 1
+            continue
+        if row.translation:
+            entry = row.entry()
+        else:
+            lookups += 1
+            try:
+                level = await store.get_level(turn.user_id, row.lang)
+                entry = parse_lookup(await _ask_model(app, lookup_messages(row.word, row.lang, True, level)),
+                                     row.lang, True)
+            except LLMError as exc:
+                log.info("import lookup %r failed: %s", row.word, exc)
+                failed += 1
+                continue
+            if lookups % 5 == 0:
+                await status.edit_text(f"📥 Импортирую… {i + 1}/{len(rows)} (перевожу слова без перевода)")
+        _, created = await store.add_word(turn.user_id, entry, today)
+        added += created
+        existing += not created
+    if lookups:
+        await app.count_usage(turn.user_id)
+    lines = [f"📥 Импорт: добавлено <b>{added}</b> сл."]
+    if existing:
+        lines.append(f"Уже были в словаре: {existing}")
+    if failed:
+        lines.append(f"Не получилось перевести: {failed}")
+    if too_many:
+        lines.append(f"Без перевода и сверх лимита {MAX_IMPORT_LOOKUP}: {len(too_many)} — "
+                     "добавь им перевод или импортируй следующей порцией")
+    if skipped:
+        lines.append(f"Пропущено строк: {skipped} (пустые, длиннее 100 символов или сверх {MAX_IMPORT})")
+    lines.append("Новые слова — в повторение с завтрашнего дня. Словарь: /dict")
+    await status.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data.startswith(CB_WORD))
@@ -575,6 +736,127 @@ async def on_speak_button(callback: CallbackQuery, app: App, turn: Turn) -> None
         await offer_phrase(msg, app, turn, lang)
 
 
+# ---------------------------------------------------------------- диктант
+
+
+def _dictation_keyboard(lang: str, answered: bool) -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton(text="🔊 Ещё раз", callback_data=f"{CB_DICT}again")] if not answered else []
+    if not answered:
+        row.append(InlineKeyboardButton(text="👀 Показать", callback_data=f"{CB_DICT}show"))
+    row += [InlineKeyboardButton(text="➡️ Дальше", callback_data=f"{CB_DICT}next:{lang}"),
+            InlineKeyboardButton(text="✖️ Хватит", callback_data=f"{CB_DICT}stop")]
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
+async def offer_dictation(target: Message, app: App, turn: Turn, lang: str) -> None:
+    """Фраза только голосом — текст ученик не видит, пока не напишет сам."""
+    store = _store(app)
+    words = await store.review_words(turn.user_id, _today(app, turn), 5, lang)
+    examples = [(ex["text"], ex.get("ru", "")) for w in words for ex in w.examples]
+    text = ""
+    if not examples or store.rng.random() < 0.5:
+        level = await store.get_level(turn.user_id, lang)
+        try:
+            text, ru = parse_phrase(await _ask_model(app, dictation_messages(lang, level, [w.word for w in words])))
+        except LLMError as exc:
+            if not examples:
+                await target.answer(f"⚠️ Не получилось придумать фразу: {exc}")
+                return
+    if not text:
+        text, ru = store.rng.choice(examples)
+    store.pending[turn.user_id] = Pending("dictation", lang, text, None, ru)
+    await target.answer(
+        f"✍️ {LANGS[lang].flag} <b>Диктант.</b> Послушай и напиши фразу {LANGS[lang].name_in} "
+        "одним сообщением — проверю орфографию (регистр и диакритику тоже, знаки препинания — нет).",
+        parse_mode=ParseMode.HTML, reply_markup=_dictation_keyboard(lang, answered=False),
+    )
+    await send_tts(app, target, text, lang)
+
+
+@router.message(Command("dictation", "diktat"))
+async def cmd_dictation(message: Message, command: CommandObject, app: App, turn: Turn) -> None:
+    if not await need_lang(message, app, turn):
+        return
+    if app.speech is None:
+        await message.answer("🎤 Сервис речи выключен (не задан SPEECH_URL) — диктант без озвучки не получится.")
+        return
+    arg = (command.args or "").strip()
+    lang = parse_lang(arg) or (await _store(app).get_state(turn.user_id)).current
+    if arg and parse_lang(arg) is None:
+        await message.answer("Использование: /dictation [de|cs]")
+        return
+    await offer_dictation(message, app, turn, lang)
+
+
+async def pending_dictation(message: Message, app: App) -> bool:
+    return await _has_pending(message, app, "dictation")
+
+
+def dictation_report(expected: str, ru: str, check: DictationCheck) -> str:
+    if check.score == 100:
+        verdict = "🎉 Без ошибок!"
+    elif check.score >= 80:
+        verdict = "👍 Почти идеально."
+    elif check.score >= 50:
+        verdict = "📝 Неплохо, но есть над чем поработать."
+    else:
+        verdict = "🔁 Много ошибок — послушай ещё раз и попробуй следующую фразу."
+    lines = [f"Правильно: <b>{_e(expected)}</b>"]
+    if ru:
+        lines.append(f"<i>{_e(ru)}</i>")
+    lines.append(f"\nВерно написано: <b>{check.score}%</b> слов — {verdict}")
+    for m in check.mistakes[:15]:
+        if m.kind == "пропущено":
+            lines.append(f"➖ пропущено: <b>{_e(m.expected)}</b>")
+        elif m.kind == "лишнее":
+            lines.append(f"➕ лишнее: <s>{_e(m.typed)}</s>")
+        else:
+            lines.append(f"❌ <s>{_e(m.typed)}</s> → <b>{_e(m.expected)}</b> ({m.kind})")
+    return "\n".join(lines)
+
+
+@router.message(F.text & ~F.text.startswith("/"), pending_dictation)
+async def on_dictation(message: Message, app: App, turn: Turn) -> None:
+    pending = _store(app).pending.pop(turn.user_id)
+    await _store(app).set_current(turn.user_id, pending.lang)
+    check = check_dictation(pending.text, message.text)
+    await message.answer(dictation_report(pending.text, pending.note, check), parse_mode=ParseMode.HTML,
+                         reply_markup=_dictation_keyboard(pending.lang, answered=True))
+
+
+@router.callback_query(F.data.startswith(CB_DICT))
+async def on_dictation_button(callback: CallbackQuery, app: App, turn: Turn) -> None:
+    msg = callback.message
+    if not lang_allowed(app, turn) or not isinstance(msg, Message):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    store = _store(app)
+    pending = store.pending.get(turn.user_id)
+    pending = pending if pending and pending.kind == "dictation" else None
+    action = callback.data.removeprefix(CB_DICT)
+    if action == "again":
+        if pending is None:
+            await callback.answer("Эта фраза уже проверена", show_alert=True)
+            return
+        await callback.answer()
+        await send_tts(app, msg, pending.text, pending.lang)
+        return
+    await callback.answer()
+    await msg.edit_reply_markup(reply_markup=None)
+    if action == "show":
+        if pending is not None:
+            store.pending.pop(turn.user_id, None)
+            note = f"\n<i>{_e(pending.note)}</i>" if pending.note else ""
+            await msg.answer(f"👀 Фраза: <b>{_e(pending.text)}</b>{note}", parse_mode=ParseMode.HTML,
+                             reply_markup=_dictation_keyboard(pending.lang, answered=True))
+    elif action == "stop":
+        if pending is not None:
+            store.pending.pop(turn.user_id, None)
+        await msg.answer("👌 Закончили с диктантом.")
+    elif action.startswith("next:") and (lang := action.removeprefix("next:")) in LANGS:
+        await offer_dictation(msg, app, turn, lang)
+
+
 # ---------------------------------------------------------------- темы словаря
 
 
@@ -752,12 +1034,14 @@ async def cmd_lang(message: Message, command: CommandObject, app: App, turn: Tur
         "", "<b>Команды</b>",
         "/w слово — перевод, примеры, озвучка → в словарь",
         "/dict [de|cs] [буква|тема] — словарь по алфавиту · /wdel номер",
+        "/wexport [de|cs] — словарь в CSV · /wimport [de|cs] — импорт списка слов",
         "/topics — темы словаря · /wtopic номер тема",
         "/read [de|cs] [тема] — текст своего уровня с новыми словами и вопросами",
         "/quiz [de|cs] [тема] [N] — тест по своим словам (или по теме)",
         "/lesson [de|cs] [тема] — урок · /test — тест по грамматике",
         "/talk [de|cs] [тема] — разговорная практика",
         "/speak [de|cs] — произношение (голосовым)",
+        "/dictation [de|cs] — диктант: слушаешь фразу и пишешь, я проверяю орфографию",
         "/lang de B1 — язык и уровень · /lang daily on|off",
     ]
     await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)

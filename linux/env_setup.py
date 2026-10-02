@@ -4,6 +4,7 @@
 - дописывает новые настройки из .env.example (кроме BOT_TOKEN и ADMIN_IDS);
 - генерирует SEARXNG_SECRET и GRAFANA_PASSWORD, если там ещё replace-me;
 - GPU_LLM / GPU_IMAGEGEN / GPU_SPEECH=auto → UUID карты по имени из nvidia-smi;
+- пустой GRAFANA_ALERT_CHAT_ID → первый из ADMIN_IDS (оповещения Grafana в Telegram);
 - проверяет, что BOT_TOKEN и ADMIN_IDS заданы.
 
     python3 linux/env_setup.py [.env] [.env.example]
@@ -69,6 +70,11 @@ def setup(env_path: Path, example_path: Path, gpus: list[tuple[str, str]]) -> li
             secret = secrets.token_hex(32 if key == "SEARXNG_SECRET" else 8)
             lines[i] = f"{key}={secret}"
             print(f"  {key} сгенерирован" + (f": {secret} (логин admin)" if key == "GRAFANA_PASSWORD" else ""))
+        elif key == "GRAFANA_ALERT_CHAT_ID" and not val:
+            admin = (value(lines, "ADMIN_IDS") or "").replace(";", ",").split(",")[0].strip()
+            if admin.isdigit():
+                lines[i] = f"{key}={admin}"
+                print(f"  {key} = {admin} (оповещения Grafana — первому админу)")
         elif key in names and val in ("", "auto") and f"${{{key}" in used:
             found = [uuid for name, uuid in gpus if names[key].lower() in name.lower()]
             if found:

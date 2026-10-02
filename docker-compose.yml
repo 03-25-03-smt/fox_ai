@@ -178,6 +178,10 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/fox-ai.json
+      # Оповещения в Telegram (monitoring/grafana/provisioning/alerting): тот же бот, чат админа
+      # Пустой GRAFANA_ALERT_CHAT_ID — оповещения не доходят (linux/install.sh подставит первого админа)
+      - TELEGRAM_BOT_TOKEN=${BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${GRAFANA_ALERT_CHAT_ID:-}
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

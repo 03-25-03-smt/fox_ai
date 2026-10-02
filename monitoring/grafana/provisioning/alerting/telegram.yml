@@ -1,0 +1,28 @@
+# Оповещения Grafana → Telegram (админу, GRAFANA_ALERT_CHAT_ID), тем же ботом (BOT_TOKEN).
+# Переменные подставляет Grafana из окружения контейнера (docker-compose.yml, сервис grafana).
+# Здесь нет `$` в шаблонах: в этом файле Grafana подставляет $ПЕРЕМЕННЫЕ окружения.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: telegram
+    receivers:
+      - uid: fox-telegram
+        type: telegram
+        disableResolveMessage: false
+        settings:
+          bottoken: $TELEGRAM_BOT_TOKEN
+          chatid: $TELEGRAM_CHAT_ID
+          parse_mode: HTML
+          message: |
+            {{ range .Alerts.Firing }}🚨 <b>Grafana:</b> {{ .Annotations.summary }}
+            {{ end }}{{ range .Alerts.Resolved }}✅ <b>Grafana, прошло:</b> {{ .Annotations.resolved }}
+            {{ end }}
+
+policies:
+  - orgId: 1
+    receiver: telegram
+    group_by: [alertname, gpu, model]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

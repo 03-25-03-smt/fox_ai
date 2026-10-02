@@ -157,8 +157,10 @@ def test_env_setup(tmp_path, capsys):
     assert "replace-me\nGPU" not in text and len(text.split("SEARXNG_SECRET=")[1].split()[0]) == 64
     assert [p.split(" ")[0] for p in problems] == ["BOT_TOKEN", "ADMIN_IDS"]
 
-    env.write_text(env.read_text().replace("123456:replace-me", "123456:" + "A" * 35) + "ADMIN_IDS=42\n")
+    env.write_text(env.read_text().replace("123456:replace-me", "123456:" + "A" * 35)
+                   + "ADMIN_IDS=42, 77\nGRAFANA_ALERT_CHAT_ID=\n")
     assert env_setup.setup(env, example, gpus) == []
+    assert "GRAFANA_ALERT_CHAT_ID=42\n" in env.read_text()  # оповещения — первому админу
     assert "новых настроек нет" in capsys.readouterr().out
 
     env.write_text(env.read_text() + "BACKUP_HOST_DIR=backups\n")

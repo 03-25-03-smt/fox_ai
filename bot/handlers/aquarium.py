@@ -58,10 +58,13 @@ from ..aquarium_brain import (
     water_warnings,
 )
 from ..assistant import Turn
+from ..services import ServiceError
 from .common import respond, with_user
 from .registry import Routes
 
 router = Routes("aquarium")
+
+MAX_VOICE_BYTES = 20 * 1024 * 1024  # больше Telegram не даёт скачать боту
 
 
 def _aq(app: App) -> Aquarium:
@@ -566,7 +569,7 @@ async def on_question_button(callback: CallbackQuery, app: App, turn: Turn) -> N
         await callback.message.edit_reply_markup(reply_markup=None)
     if action == "answer":
         brain.answering[turn.user_id] = question[0]
-        await callback.message.answer("✍️ Слушаю — напиши ответ одним сообщением.")
+        await callback.message.answer("✍️ Слушаю — напиши ответ одним сообщением или пришли голосовое.")
     else:
         await brain.close_question(question[0], answered=False)
         await callback.message.answer("👌 Хорошо, спрошу о другом в другой раз.")
@@ -585,6 +588,34 @@ async def answering_question(message: Message, app: App) -> bool:
 
 @router.message(F.text & ~F.text.startswith("/"), answering_question)
 async def on_answer(message: Message, app: App, turn: Turn) -> None:
+    await answer_question(message, app, turn, message.text)
+
+
+@router.message(F.voice | F.audio, answering_question)
+async def on_voice_answer(message: Message, bot: Bot, app: App, turn: Turn) -> None:
+    """Ответ на вопрос дня голосовым: Whisper → текст → как обычный ответ."""
+    if app.speech is None:
+        await message.answer("🎤 Распознавание речи выключено (не задан SPEECH_URL) — ответь текстом.")
+        return
+    media = message.voice or message.audio
+    if (media.file_size or 0) > MAX_VOICE_BYTES:
+        await message.answer("Аудио больше 20 МБ — Telegram не даст его скачать боту.")
+        return
+    status = await message.answer("🎤 Слушаю…")
+    data = (await bot.download(media)).read()
+    try:
+        text = await app.speech.transcribe(data, getattr(media, "file_name", None) or "voice.ogg", language="ru")
+    except ServiceError as exc:
+        await status.edit_text(f"⚠️ {exc} Ответь текстом — вопрос ещё открыт.")
+        return
+    if not text:
+        await status.edit_text("🎤 Не расслышал. Пришли голосовое ещё раз или ответь текстом.")
+        return
+    await status.edit_text(f"🎤 <i>{html.escape(text)}</i>", parse_mode=ParseMode.HTML)
+    await answer_question(message, app, turn, text)
+
+
+async def answer_question(message: Message, app: App, turn: Turn, text: str) -> None:
     brain, aq = app.assistant.aquarium_brain, _aq(app)
     qid = brain.answering.pop(turn.user_id, None)
     if qid is None and message.reply_to_message:
@@ -595,12 +626,12 @@ async def on_answer(message: Message, app: App, turn: Turn) -> None:
     await brain.close_question(qid)
     tank = await aq.tank(question[2])
     async with app.queue.slot():
-        added = await brain.learn(app.llm, app.settings.default_model, message.text, await aq.tanks(),
+        added = await brain.learn(app.llm, app.settings.default_model, text, await aq.tanks(),
                                   source="question", question=question[4], tank=tank)
     if added:
         await message.answer("🧠 Запомнил:\n" + "\n".join(f"• {a}" for a in added))
     where = f" про {tank.label}" if tank else ""
-    prompt = (f"Ты спросил меня{where}: «{question[4]}». Мой ответ: {message.text}\n"
+    prompt = (f"Ты спросил меня{where}: «{question[4]}». Мой ответ: {text}\n"
               "Коротко (2–4 предложения) прокомментируй как аквариумист: всё ли в порядке, и дай один "
               "полезный совет. Если это стоит учесть в графике ухода — скажи, что поменять.")
     await respond(message, app, with_user(turn, mode="aquarium"), prompt, extract_memory=False,

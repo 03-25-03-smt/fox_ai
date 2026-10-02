@@ -1,0 +1,122 @@
+# Правила оповещений Fox AI. Пороги — числами прямо здесь (в запросах Grafana не подставляет
+# переменные окружения). Поменял — docker compose restart grafana.
+#
+#   GPU перегрев       карта выше 85 °C 5 минут подряд (бот пишет сразу, Grafana — если не помог
+#                      бережный режим)
+#   падение скорости   ток/с модели за 30 мин ниже 60 % от обычной за неделю (от 3 ответов)
+#   агент хоста        fox-agent не отвечает 3 минуты: нет /logs, /restart, /power и температур
+#   бот не отвечает    Prometheus 3 минуты не может достучаться до бота (контейнер упал)
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: fox_ai
+    folder: Fox AI
+    interval: 1m
+    rules:
+      - uid: fox-gpu-hot
+        title: GPU перегрев
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: '🔥 {{ $labels.gpu }}: {{ with $values.A }}{{ humanize .Value }}{{ end }} °C уже 5 минут (порог 85 °C). Проверь обдув; лимит — /power 180.'
+          resolved: '{{ $labels.gpu }} остыла ниже 85 °C.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max by (gpu) (fox_gpu_temperature_celsius)
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [85] }
+
+      - uid: fox-speed-drop
+        title: Падение скорости модели
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: '🐢 {{ $labels.model }} отвечает на {{ with $values.A }}{{ humanizePercentage .Value }}{{ end }} от обычной скорости (за 30 минут против недели). Возможны троттлинг P100, модель на CPU (/ps, ollama ps) или нехватка VRAM.'
+          resolved: 'скорость {{ $labels.model }} вернулась к обычной.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 1800, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (sum by (model) (rate(fox_tokens_per_second_sum[30m]))
+                  / sum by (model) (rate(fox_tokens_per_second_count[30m])))
+                / (sum by (model) (rate(fox_tokens_per_second_sum[7d]))
+                  / sum by (model) (rate(fox_tokens_per_second_count[7d])))
+                and on (model) sum by (model) (increase(fox_tokens_per_second_count[30m])) >= 3
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.6] }
+
+      - uid: fox-agent-down
+        title: Агент хоста не отвечает
+        condition: C
+        for: 3m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: '🖥 Агент хоста fox-agent не отвечает: не работают /logs, /restart, /power и температуры (бережный режим P100 тоже). На сервере: sudo systemctl restart fox-agent'
+          resolved: 'агент хоста снова на связи.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model: { refId: A, expr: min(fox_host_agent_up), instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      - uid: fox-bot-down
+        title: Бот не отвечает
+        condition: C
+        for: 3m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical }
+        annotations:
+          summary: '🤖 Бот не отвечает Prometheus уже 3 минуты — контейнер упал или завис. На сервере: docker compose logs --tail 50 bot'
+          resolved: 'бот снова работает.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model: { refId: A, expr: 'min(up{job="fox_ai"})', instant: true }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }

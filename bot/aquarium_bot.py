@@ -269,7 +269,8 @@ async def ask_question(bot: Bot, app: App, user_id: int, now: datetime.datetime 
         msg = await bot.send_message(
             user_id,
             f"🐠 <b>Вопрос про {html.escape(tank.label)}</b> · {TOPICS[topic][0]}\n\n{html.escape(question)}\n\n"
-            "<i>Ответь на это сообщение или нажми «Ответить» — запомню и учту в советах и графике.</i>",
+            "<i>Ответь на это сообщение текстом или голосовым (или нажми «Ответить») — запомню и учту "
+            "в советах и графике.</i>",
             parse_mode="HTML", reply_markup=question_keyboard(qid),
         )
     except TelegramAPIError as exc:

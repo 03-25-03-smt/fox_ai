@@ -1,13 +1,16 @@
-"""Учитель языков: личный словарь, интервальное повторение, тесты, произношение.
+"""Учитель языков: личный словарь, интервальное повторение, тесты, произношение, диктант,
+экспорт словаря в CSV и импорт списка слов.
 
 Языки — немецкий и чешский, объяснения на русском. Слова хранятся в таблице vocab
 и повторяются по схеме Leitner: правильный ответ — слово переезжает в следующую
 коробку и вернётся позже, ошибка — снова в первую коробку, повтор завтра.
 """
 
+import csv
 import datetime
 import difflib
 import html
+import io
 import json
 import random
 import re
@@ -198,10 +201,13 @@ class LangState:
 @dataclass
 class Pending:
     """Чего бот ждёт от ученика следующим сообщением."""
-    kind: str  # "speak" — голосовое с фразой, "sentence" — своё предложение со словом
+    # "speak" — голосовое с фразой, "sentence" — своё предложение со словом,
+    # "dictation" — написанная на слух фраза, "import" — список слов после /wimport
+    kind: str
     lang: str
-    text: str  # фраза для произношения или слово для предложения
+    text: str  # фраза для произношения / диктанта или слово для предложения
     word_id: int | None = None
+    note: str = ""  # перевод фразы диктанта — показать после проверки
 
 
 @dataclass
@@ -656,3 +662,179 @@ def parse_reading(raw: str, lang: str, topic: str) -> Reading:
     questions = [str(q).strip() for q in data.get("questions") or [] if str(q).strip()]
     return Reading(lang, topic, str(data.get("title") or "").strip()[:100] or topic, text[:3000],
                    str(data.get("ru") or "").strip()[:3500], words[:10], questions[:5])
+
+
+# ---------------------------------------------------------------- экспорт и импорт словаря
+
+CSV_FIELDS = ("lang", "word", "translation", "pos", "grammar", "topic", "examples", "tip",
+              "box", "due", "correct", "wrong")
+MAX_IMPORT = 500  # строк за один импорт
+MAX_IMPORT_LOOKUP = 30  # слов без перевода — их переводит модель, по одному запросу на слово
+_LIST_MARK_RE = re.compile(r"^\s*(?:[-*•·]|\d{1,4}[.)])\s+")
+# Разделители «слово — перевод» по убыванию надёжности: в переводе могут быть запятые
+_SEPARATORS = ("\t", ";", " — ", " – ", " - ", " = ", "=", ": ", ",")
+
+
+def _examples_to_csv(examples: list[dict[str, str]]) -> str:
+    return " | ".join(f"{e['text']} — {e['ru']}" if e.get("ru") else e["text"] for e in examples)
+
+
+def _examples_from_csv(value: str) -> list[dict[str, str]]:
+    out = []
+    for part in value.split("|"):
+        text, _, ru = part.partition(" — ")
+        if text.strip():
+            out.append({"text": text.strip()[:300], "ru": ru.strip()[:300]})
+    return out[:3]
+
+
+def export_csv(words: list[Word]) -> bytes:
+    """Словарь в CSV. UTF-8 с BOM — Excel и LibreOffice сразу откроют кириллицу и умлауты."""
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(CSV_FIELDS)
+    for w in words:
+        writer.writerow([w.lang, w.word, w.translation, w.pos, w.grammar,
+                         w.topic if w.topic in TOPICS else "другое", _examples_to_csv(w.examples), w.tip,
+                         w.box, w.due, w.correct, w.wrong])
+    return buf.getvalue().encode("utf-8-sig")
+
+
+@dataclass(frozen=True)
+class ImportRow:
+    lang: str
+    word: str
+    translation: str = ""  # пусто — переведёт модель
+    pos: str = ""
+    grammar: str = ""
+    topic: str = ""
+    examples: tuple[tuple[str, str], ...] = ()
+    tip: str = ""
+
+    def entry(self) -> dict[str, Any]:
+        """Запись для LangStore.add_word (слово с готовым переводом)."""
+        return {"lang": self.lang, "word": self.word, "lemma": bare_word(self.word),
+                "translation": self.translation, "pos": self.pos, "grammar": self.grammar,
+                "examples": [{"text": t, "ru": r} for t, r in self.examples], "tip": self.tip,
+                "topic": parse_topic(self.topic) or "другое"}
+
+
+def _split_line(line: str) -> tuple[str, str]:
+    for sep in _SEPARATORS:
+        if sep in line:
+            word, _, translation = line.partition(sep)
+            if word.strip():
+                return word.strip(), translation.strip()
+    return line.strip(), ""
+
+
+def parse_import(text: str, default_lang: str) -> tuple[list[ImportRow], int]:
+    """Список слов из CSV (как у /wexport) или по строке на слово: «Hund — собака», «Katze».
+
+    Возвращает (строки, сколько строк пропущено). Не больше MAX_IMPORT строк.
+    """
+    text = text.lstrip("\ufeff")
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    rows: list[ImportRow] = []
+    skipped = 0
+    head = lines[0].casefold() if lines else ""
+    if "word" in head and ("translation" in head or "lang" in head):
+        try:
+            dialect = csv.Sniffer().sniff(lines[0], delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
+        for rec in csv.DictReader(io.StringIO("\n".join(lines)), dialect=dialect):
+            rec = {str(k).strip().casefold(): str(v or "").strip() for k, v in rec.items() if k}
+            word = rec.get("word", "")
+            if not word or len(word) > 100:
+                skipped += 1
+                continue
+            lang = parse_lang(rec.get("lang")) or default_lang
+            examples = tuple((e["text"], e["ru"]) for e in _examples_from_csv(rec.get("examples", "")))
+            rows.append(ImportRow(lang, word, rec.get("translation", "")[:200], rec.get("pos", "")[:40],
+                                  rec.get("grammar", "")[:200], rec.get("topic", ""), examples,
+                                  rec.get("tip", "")[:300]))
+    else:
+        for line in lines:
+            word, translation = _split_line(_LIST_MARK_RE.sub("", line))
+            if not word or len(word) > 100:
+                skipped += 1
+                continue
+            rows.append(ImportRow(default_lang, word, translation[:200]))
+    if len(rows) > MAX_IMPORT:
+        skipped += len(rows) - MAX_IMPORT
+        rows = rows[:MAX_IMPORT]
+    return rows, skipped
+
+
+# ---------------------------------------------------------------- диктант
+
+_TOKEN_RE = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*")
+
+
+def dictation_messages(lang: str, level: str, words: list[str]) -> list[dict[str, str]]:
+    use = f" Используй одно из слов ученика: {', '.join(words)}." if words else ""
+    traps = ("заглавные буквы у существительных, умлауты, ß/ss, ie/ei" if lang == "de"
+             else "háček и čárka, i/y после согласных, ů/ú, mě/mně")
+    return [
+        {"role": "system", "content": "Ты преподаватель языка. Отвечаешь только JSON."},
+        {"role": "user", "content": (
+            f"Придумай одно естественное предложение {LANGS[lang].name_in} (6–12 слов) уровня {level} "
+            f"для диктанта: ученик услышит его и напишет. Пусть в нём будут типичные орфографические "
+            f"трудности ({traps}), но только слова уровня {level}.{use} "
+            'Верни JSON: {"text": "предложение", "ru": "перевод на русский"}'
+        )},
+    ]
+
+
+@dataclass(frozen=True)
+class DictationMistake:
+    kind: str  # «регистр», «диакритика», «орфография», «пропущено», «лишнее»
+    typed: str
+    expected: str
+
+
+@dataclass(frozen=True)
+class DictationCheck:
+    score: int  # 0..100: доля слов, написанных без ошибок
+    mistakes: list[DictationMistake]
+
+
+def _mistake(typed: str, expected: str) -> DictationMistake:
+    if typed.casefold() == expected.casefold():
+        return DictationMistake("регистр", typed, expected)
+    if _strip_accents(typed).casefold() == _strip_accents(expected).casefold():
+        return DictationMistake("диакритика", typed, expected)
+    return DictationMistake("орфография", typed, expected)
+
+
+def check_dictation(expected: str, typed: str) -> DictationCheck:
+    """Сравнивает по словам, с учётом регистра и диакритики; знаки препинания не проверяются."""
+    want, got = _TOKEN_RE.findall(expected), _TOKEN_RE.findall(typed)
+    if not want:
+        return DictationCheck(100, [])
+    # Выравниваем по «мягким» ключам, чтобы «hund» встал против «Hund», а не считался пропуском
+    def soft(words: list[str]) -> list[str]:
+        return [_strip_accents(w).casefold() for w in words]
+
+    matcher = difflib.SequenceMatcher(a=soft(want), b=soft(got), autojunk=False)
+    mistakes: list[DictationMistake] = []
+    good = 0
+    for op, a1, a2, b1, b2 in matcher.get_opcodes():
+        if op == "equal":
+            for w, g in zip(want[a1:a2], got[b1:b2], strict=True):
+                if w == g:
+                    good += 1
+                else:
+                    mistakes.append(_mistake(g, w))
+        elif op == "replace":
+            pairs = min(a2 - a1, b2 - b1)
+            for i in range(pairs):
+                mistakes.append(_mistake(got[b1 + i], want[a1 + i]))
+            mistakes += [DictationMistake("пропущено", "", w) for w in want[a1 + pairs:a2]]
+            mistakes += [DictationMistake("лишнее", g, "") for g in got[b1 + pairs:b2]]
+        elif op == "delete":
+            mistakes += [DictationMistake("пропущено", "", w) for w in want[a1:a2]]
+        else:  # insert
+            mistakes += [DictationMistake("лишнее", g, "") for g in got[b1:b2]]
+    return DictationCheck(round(100 * good / len(want)), mistakes)
