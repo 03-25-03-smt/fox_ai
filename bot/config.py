@@ -82,12 +82,13 @@ class Settings(BaseSettings):
     lang_daily_min: int = 5  # и случайное число слов
     lang_daily_max: int = 15
 
-    # --- Аквариумы владельца ---
+    # --- Аквариумы: у каждого пользователя бота может быть свой дом (/aqstart, /aqjoin) ---
     aquarium_enabled: bool = True
-    aquarium_owner_id: str = ""  # чьи аквариумы; пусто = первый из ADMIN_IDS
-    # Аквариумы при первом запуске: «Имя:литры, …». Потом — /aqtank
+    # Кто получает дом автоматически (с аквариумами AQUARIUM_TANKS); пусто = первый из ADMIN_IDS
+    aquarium_owner_id: str = ""
+    # Аквариумы этого дома при первом запуске: «Имя:литры, …». Потом — /aqtank
     aquarium_tanks: str = "Большой:85,Нано:5"
-    aquarium_timezone: str = ""  # пусто = TIMEZONE
+    aquarium_timezone: str = ""  # часовой пояс новых домов; пусто = TIMEZONE. Свой у дома — /aqtz
     aquarium_ask_hour: int = 18  # после скольки (местное время) задавать вопрос дня
 
     # --- Мониторинг и бэкапы ---
@@ -125,13 +126,6 @@ class Settings(BaseSettings):
     @property
     def aquarium_owner(self) -> int:
         return min(parse_ids(self.aquarium_owner_id) or self.admins, default=0)
-
-    @property
-    def aquarium_members(self) -> frozenset[int]:
-        """Кому доступны аквариумы: только владельцу."""
-        if not self.aquarium_enabled or not self.aquarium_owner:
-            return frozenset()
-        return frozenset({self.aquarium_owner})
 
     @property
     def web_enabled(self) -> bool:

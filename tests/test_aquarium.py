@@ -1,4 +1,4 @@
-"""Аквариумы владельца: несколько аквариумов, график ухода от агента, кнопки, отчёты,
+"""Аквариумы: дома и участники, несколько аквариумов, график ухода от агента, кнопки, отчёты,
 знания, вопрос дня, тесты воды и графики."""
 
 import datetime
@@ -12,7 +12,7 @@ from bot.aquarium import parse_days, parse_tanks_spec
 from bot.aquarium_bot import tick
 from bot.aquarium_brain import parse_plan, parse_water, water_chart_code, water_warnings
 
-from .conftest import ADMIN, FRIEND
+from .conftest import ADMIN, FRIEND, STRANGER
 
 PRAGUE = zoneinfo.ZoneInfo("Europe/Prague")
 MONDAY = datetime.date(2026, 10, 5)  # 11.10 — воскресенье
@@ -25,9 +25,8 @@ def at(day: datetime.date, hour: int, minute: int = 0) -> datetime.datetime:
 @pytest.fixture
 async def aq_env(make_env):
     env = await make_env(aquarium_timezone="Europe/Prague")
-    env.aq = env.assistant.aquarium
-    env.brain = env.assistant.aquarium_brain
-    await env.aq.seed(env.settings.aquarium_tanks)
+    env.aq = await env.assistant.aquariums.for_user(ADMIN)  # дом AQUARIUM_OWNER_ID создаётся сам
+    env.brain = env.aq.brain
     env.big, env.nano = await env.aq.tanks()
     return env
 
@@ -90,12 +89,18 @@ async def test_tanks_seeded_once(aq_env):
 # ---------------------------------------------------------------- доступ
 
 
-async def test_only_owner(aq_env):
+async def test_access_without_home(aq_env):
     env = aq_env
     await env.send(FRIEND, "/aq")
-    assert "Не знаю такую команду" in env.last_text()
+    assert "/aqstart" in env.last_text() and "/aqjoin" in env.last_text()
+    await env.send(FRIEND, "/water 85 pH 7")  # чужие аквариумы не видны
+    assert "/aqstart" in env.last_text() and not await env.brain.water_history(env.big.id)
+    await env.send(FRIEND, "/help")
+    assert "/aqstart 30" in env.last_text()
     await env.send(FRIEND, "/mode")
-    assert "Аквариумист" not in str(env.session.of_type(SendMessage)[-1].reply_markup)
+    assert "Аквариумист" in str(env.session.of_type(SendMessage)[-1].reply_markup)
+    await env.send(STRANGER, "/aqstart 30")
+    assert "Доступ закрыт" in env.last_text()
     await env.send(ADMIN, "/aq")
     menu = env.session.of_type(SendMessage)[-1]
     assert "Мои аквариумы" in menu.text and menu.reply_markup.keyboard[0][0].text == "📋 Сегодня"
@@ -382,3 +387,163 @@ def test_water_chart_code_runs():
                                                      ("ph", "2026-10-03 10:00:00", 7.4)])
     compile(code, "chart", "exec")
     assert '"ph": [["2026-10-01", 7.0]' in code.replace("\\", "")
+
+
+
+# ---------------------------------------------------------------- дома и участники
+
+
+def code_from(text: str) -> str:
+    import re
+
+    return re.search(r"/aqjoin ([0-9A-F]{6})", text).group(1)
+
+
+def to_user(env, uid) -> str:
+    return "\n".join(m.text for m in env.session.of_type(SendMessage) if m.chat_id == uid)
+
+
+async def test_separate_homes(aq_env):
+    """У брата свой дом с 30 л: свои задачи, свои знания, чужое не видно."""
+    env = aq_env
+    await env.send(FRIEND, "/aqstart 30")
+    assert "Аквариум (30 л)" in env.last_text()
+    friend = await env.assistant.aquariums.for_user(FRIEND)
+    assert friend.id != env.aq.id and friend.is_owner(FRIEND)
+    (tank,) = await friend.tanks()
+    await env.send(FRIEND, "/aqadd 19:00 каждый Покормить гуппи")  # один аквариум — указывать не нужно
+    await add_feed(env)
+    await env.send(FRIEND, "/aqschedule")
+    assert "Покормить гуппи" in env.last_text() and "Покормить рыб" not in env.last_text()
+    await env.send(FRIEND, "/water 30 pH 7")
+    assert await friend.brain.water_history(tank.id) and not await env.brain.water_history(env.big.id)
+    await env.send(FRIEND, "/aqstart 50")
+    assert "уже есть дом" in env.last_text()
+
+    await run(env, at(MONDAY, 7, 0))
+    await run(env, at(MONDAY, 19, 0))
+    assert "Покормить рыб" in to_user(env, ADMIN) and "Покормить рыб" not in to_user(env, FRIEND)
+    assert "Покормить гуппи" in to_user(env, FRIEND) and "Покормить гуппи" not in to_user(env, ADMIN)
+    # Пункт графика другого дома ни удалить, ни отметить нельзя
+    item = (await env.aq.schedule())[0]
+    await env.send(FRIEND, f"/aqdel {item.id}")
+    assert await env.aq.item(item.id)
+
+
+async def test_invite_shared_tasks_and_assign(aq_env):
+    env = aq_env
+    await env.send(ADMIN, "/aqinvite")
+    code = code_from(env.last_text())
+    await env.send(FRIEND, "/aqjoin WRONG")
+    assert "Не нашёл" in env.last_text()
+    await env.send(FRIEND, f"/aqjoin {code}")
+    assert "Ты в доме" in to_user(env, FRIEND) and "присоединился" in to_user(env, ADMIN)
+    assert [m.user_id for m in await env.aq.members()] == [ADMIN, FRIEND]
+    await env.send(FRIEND, "/aqadd 85 19:00 ср Почистить")  # помощник график не меняет
+    assert "только хозяин" in env.last_text() and not await env.aq.schedule()
+
+    item = await add_feed(env)
+    await run(env, at(MONDAY, 7, 0))
+    assert "Покормить рыб" in to_user(env, ADMIN) and "Покормить рыб" in to_user(env, FRIEND)
+    await env.click(FRIEND, f"aq:done:{MONDAY}:s{item}")
+    edits = env.session.of_type(EditMessageText)
+    assert any(e.chat_id == ADMIN and "Сделал(а)" in e.text for e in edits)  # у брата — кнопки убраны
+    row = await env.aq.get_task(MONDAY.isoformat(), f"s{item}")
+    assert row["completed_by"] == FRIEND
+    await env.click(ADMIN, f"aq:done:{MONDAY}:s{item}")  # нажал позже — видит, кто сделал
+    assert "Сделано</b> (u)" in env.session.of_type(EditMessageText)[-1].text
+
+    await env.send(ADMIN, f"/aqassign {item} u20")
+    assert "делает: u20" in env.last_text()
+    tuesday = MONDAY + datetime.timedelta(days=1)
+    before_admin = to_user(env, ADMIN).count("Покормить рыб")
+    await run(env, at(tuesday, 7, 0))
+    assert to_user(env, FRIEND).count("Покормить рыб") == 2
+    assert to_user(env, ADMIN).count("Покормить рыб") == before_admin
+    await run(env, at(tuesday, 8, 1))  # просрочка — исполнителю и хозяину
+    assert "Просрочено" in to_user(env, FRIEND) and "Просрочено" in to_user(env, ADMIN)
+    assert "Исполнитель: u20" in to_user(env, ADMIN)
+    await env.send(FRIEND, "🗓 Завтра")
+    assert "→ u20" in env.last_text()
+    await env.send(ADMIN, "/aqmembers")
+    assert "хозяин" in env.last_text() and "помощник" in env.last_text()
+
+
+async def test_question_rotates_and_report_to_all(aq_env):
+    env = aq_env
+    await env.send(ADMIN, "/aqinvite")
+    await env.send(FRIEND, f"/aqjoin {code_from(env.last_text())}")
+    await run(env, at(MONDAY, 18, 0))
+    await run(env, at(MONDAY + datetime.timedelta(days=1), 18, 0))
+    assert "Вопрос про" in to_user(env, ADMIN) and "Вопрос про" in to_user(env, FRIEND)
+    item = await add_feed(env, datetime.time(7, 0))
+    date, _ = await env.aq.save_task(f"s{item}", "Покормить", env.big.id, at(MONDAY, 7))
+    await env.aq.complete(date, f"s{item}", FRIEND, "Брат")
+    await run(env, at(MONDAY, 23, 15))
+    assert "Аквариумы за день" in to_user(env, FRIEND) and "(Брат)" in to_user(env, ADMIN)
+
+
+async def test_leave_transfer_and_delete(aq_env):
+    env = aq_env
+    await env.send(ADMIN, "/aqinvite")
+    await env.send(FRIEND, f"/aqjoin {code_from(env.last_text())}")
+    await env.send(ADMIN, "/aqleave")
+    assert "хозяин ты" in to_user(env, FRIEND)
+    assert env.aq.is_owner(FRIEND) and await env.assistant.aquariums.for_user(ADMIN) is None
+    await env.send(FRIEND, "/aqleave")
+    assert "последний" in env.last_text() and await env.assistant.aquariums.for_user(FRIEND)
+    await env.send(FRIEND, "/aqleave да")
+    assert await env.assistant.aquariums.for_user(FRIEND) is None
+    assert not await env.db._fetchall("SELECT * FROM aq_tanks")
+    await env.send(ADMIN, "/aqstart Большой:85,Нано:5")  # завести заново
+    assert len(await (await env.assistant.aquariums.for_user(ADMIN)).tanks()) == 2
+
+
+async def test_home_timezone(aq_env):
+    env = aq_env
+    await env.send(ADMIN, "/aqtz Mars/Base")
+    assert "Не знаю" in env.last_text()
+    await env.send(ADMIN, "/aqtz Europe/Kyiv")
+    assert str(env.aq.tz) == "Europe/Kyiv" and env.aq.home.tz == "Europe/Kyiv"
+    env.assistant.aquariums._cache.clear()
+    assert str((await env.assistant.aquariums.for_user(ADMIN)).tz) == "Europe/Kyiv"
+
+
+async def test_legacy_single_owner_data_migrated(tmp_path, make_env):
+    """База версии с одним владельцем: всё переезжает в дом AQUARIUM_OWNER_ID без потерь."""
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "e2e.sqlite3")
+    con.executescript("""
+        CREATE TABLE aq_tanks (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, volume REAL NOT NULL);
+        CREATE TABLE aq_plan (id INTEGER PRIMARY KEY AUTOINCREMENT, tank_id INTEGER NOT NULL, title TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'other', time TEXT NOT NULL, days TEXT NOT NULL);
+        CREATE TABLE aq_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, task_id TEXT NOT NULL,
+            task_name TEXT NOT NULL, tank_id INTEGER, sent_at TEXT NOT NULL, remind_at TEXT, overdue_at TEXT,
+            reminded INTEGER NOT NULL DEFAULT 0, overdue_notified INTEGER NOT NULL DEFAULT 0,
+            snooze_count INTEGER NOT NULL DEFAULT 0, completed_at TEXT, completed_by INTEGER,
+            completed_by_name TEXT, cant_at TEXT, cant_reason TEXT, cant_by_name TEXT, UNIQUE (date, task_id));
+        CREATE TABLE aq_settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE aq_achievements (streak INTEGER PRIMARY KEY, achieved_at TEXT NOT NULL);
+        CREATE TABLE aq_facts (id INTEGER PRIMARY KEY AUTOINCREMENT, tank_id INTEGER, topic TEXT NOT NULL,
+            text TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+        INSERT INTO aq_tanks (name, volume) VALUES ('Большой', 85), ('Нано', 5);
+        INSERT INTO aq_plan (tank_id, title, kind, time, days) VALUES (1, 'Покормить', 'feed', '07:00', '0,1,2');
+        INSERT INTO aq_tasks (date, task_id, task_name, tank_id, sent_at, completed_at)
+            VALUES ('2026-10-01', 's1', 'Покормить', 1, '2026-10-01T07:00:00+02:00', '2026-10-01T07:05:00+02:00');
+        INSERT INTO aq_settings VALUES ('paused_until', 'forever');
+        INSERT INTO aq_achievements VALUES (3, '2026-10-01');
+        INSERT INTO aq_facts (tank_id, topic, text) VALUES (1, 'fish', '10 неонов');
+    """)
+    con.commit()
+    con.close()
+    env = await make_env(aquarium_timezone="Europe/Prague")
+    aq = await env.assistant.aquariums.for_user(ADMIN)
+    assert [t.label for t in await aq.tanks()] == ["Большой (85 л)", "Нано (5 л)"]  # без повторного seed
+    assert [i.title for i in await aq.schedule()] == ["Покормить"]
+    assert (await aq.get_task("2026-10-01", "s1"))["completed_at"]
+    assert await aq.is_paused() and await aq.achieved() == [3]
+    assert [f.text for f in await aq.brain.facts()] == ["10 неонов"]
+    await env.send(FRIEND, "/aqstart 30")  # у брата — свой пустой дом
+    friend = await env.assistant.aquariums.for_user(FRIEND)
+    assert [t.volume for t in await friend.tanks()] == [30] and not await friend.brain.facts()

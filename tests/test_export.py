@@ -64,8 +64,7 @@ async def test_ics_command(env):
     await env.send(ADMIN, "/ics")
     assert "Нет напоминаний" in env.last_text()
     await env.send(ADMIN, "/remind завтра в 9 защита")
-    aq = env.assistant.aquarium
-    await aq.seed(env.settings.aquarium_tanks)
+    aq = await env.assistant.aquariums.for_user(ADMIN)
     tank = (await aq.tanks())[0]
     await aq.add_item(tank.id, "Подмена 30%", datetime.time(12, 0), (6,), "water")
     await env.send(ADMIN, "/ics")

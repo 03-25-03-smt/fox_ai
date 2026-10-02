@@ -1,6 +1,7 @@
 """Что агент знает об аквариумах и как он это узнаёт.
 
-Знания — короткие факты по аквариуму и теме (жители, растения, оборудование…).
+Знания — короткие факты по аквариуму и теме (жители, растения, оборудование…), у каждого
+дома свои (AquariumBrain(db, home_id)).
 Пополняются:
 - из ответов на «вопрос дня»: агент выбирает аквариум и тему, о которой знает меньше всего
   (или давно не обновлял), и спрашивает;
@@ -144,8 +145,9 @@ def plan_text(items: list[dict[str, Any]]) -> str:
 
 
 class AquariumBrain:
-    def __init__(self, db: Database, rng: random.Random | None = None) -> None:
+    def __init__(self, db: Database, home_id: int = 0, rng: random.Random | None = None) -> None:
         self.db = db
+        self.home_id = home_id
         self.rng = rng or random.Random()
         self.answering: dict[int, int] = {}  # user_id -> id вопроса, на который он отвечает
         self.proposals: dict[int, list[dict[str, Any]]] = {}  # tank_id -> предложенный график
@@ -153,7 +155,7 @@ class AquariumBrain:
     # ------------------------------------------------------------ факты
 
     async def facts(self, tank_id: int | None = None, topic: str | None = None) -> list[Fact]:
-        sql, params = "SELECT id, tank_id, topic, text, created_at FROM aq_facts WHERE 1 = 1", []
+        sql, params = "SELECT id, tank_id, topic, text, created_at FROM aq_facts WHERE home_id = ?", [self.home_id]
         if tank_id is not None:
             sql += " AND (tank_id = ? OR tank_id IS NULL)"
             params.append(tank_id)
@@ -169,16 +171,18 @@ class AquariumBrain:
         if not text:
             return None
         dup = await self.db._fetchone(
-            "SELECT id FROM aq_facts WHERE lower(text) = lower(?) AND tank_id IS ?", (text, tank_id)
+            "SELECT id FROM aq_facts WHERE lower(text) = lower(?) AND tank_id IS ? AND home_id = ?",
+            (text, tank_id, self.home_id),
         )
         if dup:
             return None
-        cur = await self.db._exec("INSERT INTO aq_facts (tank_id, topic, text, source) VALUES (?, ?, ?, ?)",
-                                  (tank_id, topic, text, source))
+        cur = await self.db._exec(
+            "INSERT INTO aq_facts (home_id, tank_id, topic, text, source) VALUES (?, ?, ?, ?, ?)",
+            (self.home_id, tank_id, topic, text, source))
         return int(cur.lastrowid)
 
     async def delete_fact(self, fact_id: int) -> bool:
-        cur = await self.db._exec("DELETE FROM aq_facts WHERE id = ?", (fact_id,))
+        cur = await self.db._exec("DELETE FROM aq_facts WHERE id = ? AND home_id = ?", (fact_id, self.home_id))
         return cur.rowcount > 0
 
     # ------------------------------------------------------------ вода
@@ -216,15 +220,15 @@ class AquariumBrain:
         if not tanks:
             return None
         recent = set(await self.db._fetchall(
-            "SELECT tank_id, topic FROM aq_questions WHERE asked_at >= ?",
-            (_utc(now - datetime.timedelta(days=NOT_AGAIN_DAYS)),),
+            "SELECT tank_id, topic FROM aq_questions WHERE home_id = ? AND asked_at >= ?",
+            (self.home_id, _utc(now - datetime.timedelta(days=NOT_AGAIN_DAYS))),
         ))
         unknown, stale = [], []
         for tank in tanks:
             stats = dict.fromkeys(TOPICS, (0, None))
             for topic, count, newest in await self.db._fetchall(
-                "SELECT topic, COUNT(*), MAX(created_at) FROM aq_facts WHERE tank_id = ? GROUP BY topic",
-                (tank.id,),
+                "SELECT topic, COUNT(*), MAX(created_at) FROM aq_facts WHERE tank_id = ? AND home_id = ? "
+                "GROUP BY topic", (tank.id, self.home_id),
             ):
                 if topic in stats:
                     stats[topic] = (count, newest)
@@ -272,8 +276,9 @@ class AquariumBrain:
                            now: datetime.datetime | None = None) -> int:
         asked = now or datetime.datetime.now(datetime.UTC)
         cur = await self.db._exec(
-            "INSERT INTO aq_questions (user_id, tank_id, topic, question, asked_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, tank_id, topic, question, _utc(asked)),
+            "INSERT INTO aq_questions (home_id, user_id, tank_id, topic, question, asked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (self.home_id, user_id, tank_id, topic, question, _utc(asked)),
         )
         return int(cur.lastrowid)
 
@@ -283,8 +288,8 @@ class AquariumBrain:
     async def get_question(self, question_id: int) -> tuple[int, int, int, str, str, int] | None:
         """(id, user_id, tank_id, тема, текст, answered)."""
         row = await self.db._fetchone(
-            "SELECT id, user_id, tank_id, topic, question, answered FROM aq_questions WHERE id = ?",
-            (question_id,),
+            "SELECT id, user_id, tank_id, topic, question, answered FROM aq_questions WHERE id = ? AND home_id = ?",
+            (question_id, self.home_id),
         )
         return tuple(row) if row else None
 
@@ -373,13 +378,19 @@ class AquariumBrain:
         tanks = await aquarium.tanks()
         if not tanks:
             return "Аквариумы ещё не заведены (команда /aqtank add)."
-        parts = ["Что известно об аквариумах владельца:"]
+        parts = ["Что известно об аквариумах этого дома:"]
+        members = await aquarium.members()
+        if members:
+            parts.append("Ухаживают: " + ", ".join(
+                f"{m.name or m.user_id} ({'хозяин' if m.is_owner else 'помощник'})" for m in members))
+        names = {m.user_id: m.name or str(m.user_id) for m in members}
         for tank in tanks:
             parts.append(await self.tank_context(tank))
             plan = await aquarium.schedule(tank.id)
             if plan:
                 parts.append("  График ухода: " + "; ".join(
-                    f"{i.title} {i.at:%H:%M} ({days_text(i.days)})" for i in plan))
+                    f"{i.title} {i.at:%H:%M} ({days_text(i.days)})"
+                    + (f" — делает {names[i.assignee_id]}" if i.assignee_id in names else "") for i in plan))
         common = [f.text for f in await self.facts() if f.tank_id is None]
         if common:
             parts.append("Общее: " + "; ".join(common))

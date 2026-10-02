@@ -9,7 +9,48 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA = """
+
+# Таблицы аквариумов, у которых в версии с одним владельцем был другой ключ уникальности:
+# старые базы пересобираются (_migrate_aquarium_homes)
+AQ_REBUILD = {
+    "aq_tasks": """CREATE TABLE IF NOT EXISTS aq_tasks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    home_id           INTEGER NOT NULL DEFAULT 0,
+    date              TEXT NOT NULL,
+    task_id           TEXT NOT NULL,      -- «s<id пункта графика>» или тестовая
+    task_name         TEXT NOT NULL,
+    tank_id           INTEGER,
+    assignee_id       INTEGER,            -- кому задача (NULL — всем в доме)
+    msgs              TEXT,               -- JSON {user_id: message_id}: обновить кнопки у остальных
+    sent_at           TEXT NOT NULL,
+    remind_at         TEXT,
+    overdue_at        TEXT,
+    reminded          INTEGER NOT NULL DEFAULT 0,
+    overdue_notified  INTEGER NOT NULL DEFAULT 0,
+    snooze_count      INTEGER NOT NULL DEFAULT 0,
+    completed_at      TEXT,
+    completed_by      INTEGER,
+    completed_by_name TEXT,
+    cant_at           TEXT,
+    cant_reason       TEXT,
+    cant_by_name      TEXT,
+    UNIQUE (home_id, date, task_id)
+);""",
+    "aq_settings": """CREATE TABLE IF NOT EXISTS aq_settings (
+    home_id INTEGER NOT NULL DEFAULT 0,
+    key     TEXT NOT NULL,
+    value   TEXT,
+    PRIMARY KEY (home_id, key)
+);""",
+    "aq_achievements": """CREATE TABLE IF NOT EXISTS aq_achievements (
+    home_id     INTEGER NOT NULL DEFAULT 0,
+    streak      INTEGER NOT NULL,
+    achieved_at TEXT NOT NULL,
+    PRIMARY KEY (home_id, streak)
+);""",
+}
+
+SCHEMA_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS users (
     id             INTEGER PRIMARY KEY,
     name           TEXT NOT NULL DEFAULT '',
@@ -163,53 +204,53 @@ CREATE TABLE IF NOT EXISTS lang_log (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Аквариумы владельца. Время задач — ISO с часовым поясом.
+-- Аквариумы. «Дом» — аквариумы одной семьи: хозяин и помощники видят одно и то же.
+-- У каждого пользователя один дом. home_id = 0 — данные версии с одним владельцем
+-- (при первом запуске переносятся в дом AQUARIUM_OWNER_ID). Время задач — ISO с часовым поясом.
+CREATE TABLE IF NOT EXISTS aq_homes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL DEFAULT '',
+    owner_id    INTEGER NOT NULL,
+    tz          TEXT,
+    invite_code TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS aq_members (
+    user_id   INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    home_id   INTEGER NOT NULL REFERENCES aq_homes(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL DEFAULT 'helper',  -- owner | helper
+    name      TEXT NOT NULL DEFAULT '',
+    joined_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS aq_tanks (
-    id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    name   TEXT NOT NULL,
-    volume REAL NOT NULL
-);
--- График ухода: что, в каком аквариуме, во сколько и по каким дням (0 = пн)
-CREATE TABLE IF NOT EXISTS aq_plan (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    tank_id INTEGER NOT NULL REFERENCES aq_tanks(id) ON DELETE CASCADE,
-    title   TEXT NOT NULL,
-    kind    TEXT NOT NULL DEFAULT 'other',
-    time    TEXT NOT NULL,
-    days    TEXT NOT NULL
+    name    TEXT NOT NULL,
+    volume  REAL NOT NULL,
+    home_id INTEGER NOT NULL DEFAULT 0
 );
--- Задачи по дням (task_id = «s<id пункта графика>» или тестовая)
-CREATE TABLE IF NOT EXISTS aq_tasks (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    date              TEXT NOT NULL,
-    task_id           TEXT NOT NULL,
-    task_name         TEXT NOT NULL,
-    tank_id           INTEGER,
-    sent_at           TEXT NOT NULL,
-    remind_at         TEXT,
-    overdue_at        TEXT,
-    reminded          INTEGER NOT NULL DEFAULT 0,
-    overdue_notified  INTEGER NOT NULL DEFAULT 0,
-    snooze_count      INTEGER NOT NULL DEFAULT 0,
-    completed_at      TEXT,
-    completed_by      INTEGER,
-    completed_by_name TEXT,
-    cant_at           TEXT,
-    cant_reason       TEXT,
-    cant_by_name      TEXT,
-    UNIQUE (date, task_id)
+-- График ухода: что, в каком аквариуме, во сколько, по каким дням (0 = пн) и кому (NULL — всем в доме)
+CREATE TABLE IF NOT EXISTS aq_plan (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tank_id     INTEGER NOT NULL REFERENCES aq_tanks(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'other',
+    time        TEXT NOT NULL,
+    days        TEXT NOT NULL,
+    assignee_id INTEGER
 );
-CREATE TABLE IF NOT EXISTS aq_settings (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS aq_achievements (streak INTEGER PRIMARY KEY, achieved_at TEXT NOT NULL);
+{AQ_TASKS}
+{AQ_SETTINGS}
+{AQ_ACHIEVEMENTS}
 
--- Что агент знает об аквариумах (tank_id NULL — общее для всех)
+-- Что агент знает об аквариумах (tank_id NULL — общее для всего дома)
 CREATE TABLE IF NOT EXISTS aq_facts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     tank_id    INTEGER,
     topic      TEXT NOT NULL,
     text       TEXT NOT NULL,
     source     TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    home_id    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS aq_questions (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,7 +260,8 @@ CREATE TABLE IF NOT EXISTS aq_questions (
     question  TEXT NOT NULL,
     tg_msg_id INTEGER,
     answered  INTEGER NOT NULL DEFAULT 0,  -- 1 ответил, -1 «не знаю» / пропустил
-    asked_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    asked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    home_id   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS aq_water (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,6 +309,9 @@ CREATE TABLE IF NOT EXISTS allowed_chats (
     added_by INTEGER
 );
 """
+SCHEMA = (SCHEMA_TEMPLATE.replace("{AQ_TASKS}", AQ_REBUILD["aq_tasks"])
+          .replace("{AQ_SETTINGS}", AQ_REBUILD["aq_settings"])
+          .replace("{AQ_ACHIEVEMENTS}", AQ_REBUILD["aq_achievements"]))
 
 # Колонки, добавленные после первых версий: (таблица, колонка, определение)
 MIGRATIONS = [
@@ -285,6 +330,11 @@ MIGRATIONS = [
     ("aq_questions", "tank_id", "INTEGER"),
     ("aq_questions", "tg_msg_id", "INTEGER"),
     ("aq_water", "tank_id", "INTEGER"),
+    # аквариумы: дома (несколько семей), исполнители задач
+    ("aq_tanks", "home_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("aq_plan", "assignee_id", "INTEGER"),
+    ("aq_facts", "home_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("aq_questions", "home_id", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 USER_FIELDS = (
@@ -365,6 +415,7 @@ class Database:
             if column not in await self._columns(table):
                 await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         await self._migrate_old_messages()
+        await self._migrate_aquarium_homes()
         await self._conn.commit()
 
     async def _columns(self, table: str) -> set[str]:
@@ -384,6 +435,19 @@ class Database:
             "FROM messages ORDER BY id"
         )
         await self.conn.execute("DROP TABLE messages")
+
+    async def _migrate_aquarium_homes(self) -> None:
+        """Версия с одним владельцем: задачи, настройки и достижения без home_id — пересобираем
+        таблицы с новым ключом, старые строки получают home_id = 0."""
+        for table, create in AQ_REBUILD.items():
+            cols = await self._columns(table)
+            if "home_id" in cols:
+                continue
+            listed = ", ".join(sorted(cols))
+            await self.conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+            await self.conn.execute(create)
+            await self.conn.execute(f"INSERT INTO {table} ({listed}) SELECT {listed} FROM {table}_old")
+            await self.conn.execute(f"DROP TABLE {table}_old")
 
     async def close(self) -> None:
         if self._conn is not None:

@@ -49,10 +49,12 @@ async def cmd_ics(message: Message, app: App, turn: Turn) -> None:
         return
     events = [CalendarEvent(f"reminder-{r.id}", f"⏰ {r.text}", r.due_at)
               for r in await app.db.list_reminders(turn.user_id)]
-    if turn.user_id in app.settings.aquarium_members:
-        aq = app.assistant.aquarium
+    homes = app.assistant.aquariums
+    aq = await homes.for_user(turn.user_id) if homes is not None else None
+    if aq is not None:
         today = aq.now().date()
-        for item in await aq.schedule():
+        # Свои пункты графика и общие; поручённые другим участникам — не в его календарь
+        for item in [i for i in await aq.schedule() if i.assignee_id in (None, turn.user_id)]:
             # Первое событие — ближайший подходящий день, дальше повторяет RRULE
             first = next(today + datetime.timedelta(days=i) for i in range(7)
                          if (today + datetime.timedelta(days=i)).weekday() in item.days)

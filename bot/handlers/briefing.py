@@ -81,9 +81,10 @@ async def compose(app: App, user: User, now: datetime.datetime | None = None) ->
         lines += ["", "⏰ <b>Напоминания</b>"]
         lines += [f"• {r.due_at.astimezone(tz):%H:%M} {html.escape(r.text)}" for r in today]
 
-    if user.id in app.settings.aquarium_members:
-        aq = app.assistant.aquarium
-        tasks = await aq.tasks_for(now.astimezone(aq.tz).date())
+    homes = app.assistant.aquariums
+    aq = await homes.for_user(user.id) if homes is not None else None
+    if aq is not None:
+        tasks = await aq.tasks_for(now.astimezone(aq.tz).date(), user.id)
         if tasks and not await aq.is_paused():
             lines += ["", "🐠 <b>Аквариумы</b>"]
             lines += [f"• {i.at:%H:%M} {html.escape(await aq.task_name(i))}" for i in tasks]

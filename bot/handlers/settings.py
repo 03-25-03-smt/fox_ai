@@ -71,7 +71,13 @@ LANG_HELP = (
 )
 AQUARIUM_HELP = (
     "\n\n<b>Аквариум 🐠</b>\n"
-    "/aq — меню: задачи, график ухода, статистика · /tank — что я знаю · /water — тесты воды"
+    "/aq — меню: задачи, график ухода, статистика · /tank — что я знаю · /water — тесты воды\n"
+    "/aqmembers — кто ухаживает · /aqinvite — позвать помощника"
+)
+AQUARIUM_START_HELP = (
+    "\n\n<b>Аквариум 🐠</b>\n"
+    "/aqstart 30 — завести свои аквариумы: график ухода, напоминания, тесты воды, советы\n"
+    "/aqjoin КОД — присоединиться к чужим аквариумам (код — у хозяина, /aqinvite)"
 )
 ADMIN_HELP = (
     "\n\n<b>Админ</b>\n"
@@ -90,7 +96,10 @@ ADMIN_HELP = (
 async def cmd_start(message: Message, app: App, turn: Turn, is_admin: bool) -> None:
     s = app.settings
     lang = LANG_HELP if turn.registered and turn.user_id in s.lang_users else ""
-    aquarium = AQUARIUM_HELP if turn.user_id in s.aquarium_members else ""
+    aquarium = ""
+    if turn.registered and app.assistant.aquariums is not None:
+        has_home = await app.assistant.aquariums.for_user(turn.user_id) is not None
+        aquarium = AQUARIUM_HELP if has_home else AQUARIUM_START_HELP
     await message.answer(HELP_TEXT + lang + aquarium + (ADMIN_HELP if is_admin else ""),
                          parse_mode=ParseMode.HTML)
 
@@ -138,7 +147,7 @@ def _mode_allowed(app: App, turn: Turn, key: str) -> bool:
     if audience == "lang":
         return turn.user_id in app.settings.lang_users
     if audience == "aquarium":
-        return turn.user_id in app.settings.aquarium_members
+        return turn.registered and app.assistant.aquariums is not None
     return True
 
 

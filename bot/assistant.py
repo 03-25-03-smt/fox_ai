@@ -11,8 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from . import metrics
-from .aquarium import Aquarium
-from .aquarium_brain import AquariumBrain
+from .aquarium_homes import AquariumHomes
 from .briefing import BriefingStore
 from .config import Settings
 from .db import Database, User
@@ -162,8 +161,10 @@ class Assistant:
         self.sandbox = None  # SandboxClient: инструмент run_python
         # Картинки, которые построил run_python во время ответа: chat_id -> PNG
         self.images: defaultdict[int, list[bytes]] = defaultdict(list)
-        self.aquarium = Aquarium(db, self._zone(settings.aquarium_timezone or settings.timezone))
-        self.aquarium_brain = AquariumBrain(db)
+        # Дома с аквариумами; None — аквариумы выключены (AQUARIUM_ENABLED=false)
+        self.aquariums: AquariumHomes | None = AquariumHomes(
+            db, settings.aquarium_timezone or settings.timezone, settings.aquarium_owner, settings.aquarium_tanks,
+        ) if settings.aquarium_enabled else None
         self._no_tools: set[str] = set()  # модели, которые не умеют tool calling
         self._summary_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -265,10 +266,13 @@ class Assistant:
         if mode.key == "lang" and turn.registered:
             parts.append(await self.lang.context_for(turn.user_id))
 
-        if mode.key == "aquarium":
-            today = self.aquarium.now().date()
-            parts.append(await self.aquarium_brain.context(
-                self.aquarium, await self.aquarium.care_summary(today)))
+        if mode.key == "aquarium" and self.aquariums is not None:
+            aq = await self.aquariums.for_user(turn.user_id)
+            if aq is None:
+                parts.append("У пользователя пока нет своих аквариумов в боте: завести — /aqstart 30, "
+                             "присоединиться к чужим — /aqjoin КОД. Отвечай на общие вопросы об аквариумах.")
+            else:
+                parts.append(await aq.brain.context(aq, await aq.care_summary(aq.now().date())))
 
         if mode.key == "defense":
             state = await self.db.get_state(turn.chat_id)
@@ -430,11 +434,12 @@ class Assistant:
     async def after_reply(self, turn: Turn, user_text: str, *, extract_memory: bool = True) -> None:
         if extract_memory and turn.registered and self.settings.memory_auto:
             await self.memory.extract_and_store(turn.user_id, user_text, self.settings.helper_model)
-        if (extract_memory and self.mode_for(turn).key == "aquarium"
-                and turn.user_id in self.settings.aquarium_members):
-            # Аквариумист запоминает из разговора то, что узнал об аквариуме
-            await self.aquarium_brain.learn(self.llm, self.settings.default_model, user_text,
-                                            await self.aquarium.tanks(), source="chat")
+        if extract_memory and self.mode_for(turn).key == "aquarium" and self.aquariums is not None:
+            # Аквариумист запоминает из разговора то, что узнал об аквариумах дома
+            aq = await self.aquariums.for_user(turn.user_id)
+            if aq is not None:
+                await aq.brain.learn(self.llm, self.settings.default_model, user_text,
+                                     await aq.tanks(), source="chat")
         await self.summarize_if_needed(turn.chat_id)
 
     async def translate_to_english(self, text: str) -> str:

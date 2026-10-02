@@ -1,18 +1,25 @@
-"""Аквариумы владельца: аквариумы, график ухода, задачи, напоминания, статистика, серии.
+"""Аквариумы одного «дома»: аквариумы, участники, график ухода, задачи, напоминания,
+статистика, серии.
 
-Данные — в таблицах aq_* общей базы. Время задач — ISO-строка с часовым поясом,
-даты — по часовому поясу аквариумов (AQUARIUM_TIMEZONE). Дни недели — как в Python:
-пн = 0 … вс = 6. График ухода для каждого аквариума свой: его предлагает агент
-(/aqplan) по тому, что узнал об аквариуме, или задаёт владелец (/aqadd).
+Дом — аквариумы одной семьи: хозяин (owner) управляет аквариумами, графиком и участниками,
+помощники (helper) получают задачи, отмечают их, вносят тесты воды и общаются с агентом.
+У каждого пользователя один дом; у каждого дома свои аквариумы, график и часовой пояс.
+Данные — в таблицах aq_* общей базы с home_id. Время задач — ISO-строка с часовым поясом,
+даты — по часовому поясу дома. Дни недели — как в Python: пн = 0 … вс = 6. Пункт графика
+можно поручить одному участнику (assignee), иначе задача приходит всем.
 """
 
 import datetime
 import html
+import json
 import re
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 from .db import Database
+
+if TYPE_CHECKING:
+    from .aquarium_brain import AquariumBrain
 
 TEST_TASKS = {
     "test": "🧪 Тестовая задача",
@@ -60,6 +67,9 @@ ACHIEVEMENTS = {
 }
 
 PAUSE_FOREVER = "forever"
+
+OWNER, HELPER = "owner", "helper"
+ROLES = {OWNER: "хозяин", HELPER: "помощник"}
 
 
 def days_text(days: tuple[int, ...]) -> str:
@@ -125,6 +135,7 @@ class ScheduleItem:
     kind: str
     at: datetime.time
     days: tuple[int, ...]
+    assignee_id: int | None = None
 
     @property
     def key(self) -> str:
@@ -133,6 +144,30 @@ class ScheduleItem:
     @property
     def icon(self) -> str:
         return KINDS.get(self.kind, "📝")
+
+
+@dataclass(frozen=True)
+class Home:
+    id: int
+    name: str
+    owner_id: int
+    tz: str | None = None
+    invite_code: str | None = None
+
+
+@dataclass(frozen=True)
+class Member:
+    user_id: int
+    role: str
+    name: str
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role == OWNER
+
+    @property
+    def label(self) -> str:
+        return f"{self.name or self.user_id}" + (" 👑" if self.is_owner else "")
 
 
 Row = dict[str, Any]
@@ -169,9 +204,20 @@ def parse_tanks_spec(spec: str) -> list[tuple[str, float]]:
 
 
 class Aquarium:
-    def __init__(self, db: Database, tz: datetime.tzinfo) -> None:
+    """Аквариумы одного дома. Создаёт AquariumHomes; brain — знания агента об этом доме."""
+
+    def __init__(self, db: Database, home: Home, tz: datetime.tzinfo) -> None:
         self.db = db
+        self.home = home
         self.tz = tz
+        self.brain: AquariumBrain | None = None
+
+    @property
+    def id(self) -> int:
+        return self.home.id
+
+    def is_owner(self, user_id: int) -> bool:
+        return self.home.owner_id == user_id
 
     def now(self) -> datetime.datetime:
         return datetime.datetime.now(self.tz)
@@ -188,25 +234,73 @@ class Aquarium:
         rows = await self._rows(sql, params)
         return rows[0] if rows else None
 
+    # ------------------------------------------------------------ дом и участники
+
+    async def _set_home(self, **fields: Any) -> None:
+        for column, value in fields.items():
+            assert column in ("name", "owner_id", "tz", "invite_code")
+            await self.db._exec(f"UPDATE aq_homes SET {column} = ? WHERE id = ?", (value, self.id))
+        self.home = replace(self.home, **fields)
+
+    async def members(self) -> list[Member]:
+        """Хозяин первым, дальше — по времени вступления."""
+        rows = await self.db._fetchall(
+            "SELECT user_id, role, name FROM aq_members WHERE home_id = ? "
+            "ORDER BY role = 'owner' DESC, joined_at, user_id", (self.id,),
+        )
+        return [Member(*r) for r in rows]
+
+    async def member(self, user_id: int) -> Member | None:
+        return next((m for m in await self.members() if m.user_id == user_id), None)
+
+    async def find_member(self, ref: str) -> Member | None:
+        """По Telegram ID или началу имени."""
+        ref = ref.strip().lower().lstrip("@")
+        members = await self.members()
+        if ref.isdigit():
+            return next((m for m in members if m.user_id == int(ref)), None)
+        found = [m for m in members if ref and m.name.lower().startswith(ref)]
+        return found[0] if len(found) == 1 else None
+
+    async def member_name(self, user_id: int | None) -> str:
+        member = await self.member(user_id) if user_id else None
+        return member.name or str(member.user_id) if member else "все"
+
+    async def recipients(self, assignee_id: int | None) -> list[int]:
+        """Кому слать задачу: исполнителю, если он ещё в доме, иначе всем."""
+        ids = [m.user_id for m in await self.members()]
+        return [assignee_id] if assignee_id in ids else ids
+
     # ------------------------------------------------------------ аквариумы
 
     async def seed(self, spec: str) -> None:
-        """Создаёт аквариумы из AQUARIUM_TANKS, если их ещё нет."""
+        """Создаёт аквариумы из «Имя:литры,…», если их ещё нет."""
         if await self.tanks():
             return
         for name, volume in parse_tanks_spec(spec):
             await self.add_tank(name, volume)
 
     async def tanks(self) -> list[Tank]:
-        return [Tank(*r) for r in await self.db._fetchall("SELECT id, name, volume FROM aq_tanks ORDER BY id")]
+        return [Tank(*r) for r in await self.db._fetchall(
+            "SELECT id, name, volume FROM aq_tanks WHERE home_id = ? ORDER BY id", (self.id,))]
 
-    async def tank(self, tank_id: int) -> Tank | None:
-        row = await self.db._fetchone("SELECT id, name, volume FROM aq_tanks WHERE id = ?", (tank_id,))
+    async def tank(self, tank_id: int | None) -> Tank | None:
+        row = await self.db._fetchone("SELECT id, name, volume FROM aq_tanks WHERE id = ? AND home_id = ?",
+                                      (tank_id, self.id))
         return Tank(*row) if row else None
 
     async def add_tank(self, name: str, volume: float) -> Tank:
-        cur = await self.db._exec("INSERT INTO aq_tanks (name, volume) VALUES (?, ?)", (name[:40], volume))
+        cur = await self.db._exec("INSERT INTO aq_tanks (name, volume, home_id) VALUES (?, ?, ?)",
+                                  (name[:40], volume, self.id))
         return Tank(int(cur.lastrowid), name[:40], volume)
+
+    async def delete_tank(self, tank_id: int) -> bool:
+        """Удаляет аквариум и его график; история задач, знания и тесты воды остаются."""
+        if await self.tank(tank_id) is None:
+            return False
+        await self.db._exec("DELETE FROM aq_plan WHERE tank_id = ?", (tank_id,))
+        await self.db._exec("DELETE FROM aq_tanks WHERE id = ?", (tank_id,))
+        return True
 
     async def find_tank(self, ref: str) -> Tank | None:
         """По номеру, объёму («85», «85л») или началу имени."""
@@ -222,14 +316,16 @@ class Aquarium:
     # ------------------------------------------------------------ настройки
 
     async def get_setting(self, key: str) -> str | None:
-        row = await self.db._fetchone("SELECT value FROM aq_settings WHERE key = ?", (key,))
+        row = await self.db._fetchone("SELECT value FROM aq_settings WHERE home_id = ? AND key = ?",
+                                      (self.id, key))
         return row[0] if row else None
 
     async def set_setting(self, key: str, value: str) -> None:
-        await self.db._exec("INSERT OR REPLACE INTO aq_settings (key, value) VALUES (?, ?)", (key, value))
+        await self.db._exec("INSERT OR REPLACE INTO aq_settings (home_id, key, value) VALUES (?, ?, ?)",
+                            (self.id, key, value))
 
     async def delete_setting(self, key: str) -> None:
-        await self.db._exec("DELETE FROM aq_settings WHERE key = ?", (key,))
+        await self.db._exec("DELETE FROM aq_settings WHERE home_id = ? AND key = ?", (self.id, key))
 
     async def once(self, key: str, day: str) -> bool:
         """True, если событие key сегодня ещё не случалось (и отмечает его)."""
@@ -269,46 +365,59 @@ class Aquarium:
 
     # ------------------------------------------------------------ график ухода
 
+    _OWN_PLAN = "tank_id IN (SELECT id FROM aq_tanks WHERE home_id = ?)"
+
     async def schedule(self, tank_id: int | None = None) -> list[ScheduleItem]:
-        sql = "SELECT id, tank_id, title, kind, time, days FROM aq_plan"
-        params: tuple = ()
+        sql = f"SELECT id, tank_id, title, kind, time, days, assignee_id FROM aq_plan WHERE {self._OWN_PLAN}"
+        params: tuple = (self.id,)
         if tank_id is not None:
-            sql, params = sql + " WHERE tank_id = ?", (tank_id,)
+            sql, params = sql + " AND tank_id = ?", (*params, tank_id)
         items = []
-        for sid, tid, title, kind, time, days in await self.db._fetchall(sql + " ORDER BY time, id", params):
+        for sid, tid, title, kind, time, days, assignee in await self.db._fetchall(
+                sql + " ORDER BY time, id", params):
             hour, minute = map(int, time.split(":"))
             items.append(ScheduleItem(sid, tid, title, kind, datetime.time(hour, minute),
-                                      tuple(int(d) for d in days.split(",") if d)))
+                                      tuple(int(d) for d in days.split(",") if d), assignee))
         return items
 
     async def item(self, item_id: int) -> ScheduleItem | None:
         return next((i for i in await self.schedule() if i.id == item_id), None)
 
     async def add_item(self, tank_id: int, title: str, at: datetime.time, days: tuple[int, ...],
-                       kind: str = "other") -> int:
+                       kind: str = "other", assignee_id: int | None = None) -> int:
         cur = await self.db._exec(
-            "INSERT INTO aq_plan (tank_id, title, kind, time, days) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO aq_plan (tank_id, title, kind, time, days, assignee_id) VALUES (?, ?, ?, ?, ?, ?)",
             (tank_id, title[:80], kind if kind in KINDS else "other", at.strftime("%H:%M"),
-             ",".join(map(str, sorted(set(days))))),
+             ",".join(map(str, sorted(set(days)))), assignee_id),
         )
         return int(cur.lastrowid)
 
     async def delete_item(self, item_id: int) -> bool:
-        cur = await self.db._exec("DELETE FROM aq_plan WHERE id = ?", (item_id,))
+        cur = await self.db._exec(f"DELETE FROM aq_plan WHERE id = ? AND {self._OWN_PLAN}", (item_id, self.id))
         return cur.rowcount > 0
 
     async def set_item_time(self, item_id: int, at: datetime.time) -> bool:
-        cur = await self.db._exec("UPDATE aq_plan SET time = ? WHERE id = ?", (at.strftime("%H:%M"), item_id))
+        cur = await self.db._exec(f"UPDATE aq_plan SET time = ? WHERE id = ? AND {self._OWN_PLAN}",
+                                  (at.strftime("%H:%M"), item_id, self.id))
+        return cur.rowcount > 0
+
+    async def set_assignee(self, item_id: int, user_id: int | None) -> bool:
+        cur = await self.db._exec(f"UPDATE aq_plan SET assignee_id = ? WHERE id = ? AND {self._OWN_PLAN}",
+                                  (user_id, item_id, self.id))
         return cur.rowcount > 0
 
     async def replace_schedule(self, tank_id: int, items: list[dict[str, Any]]) -> int:
+        if await self.tank(tank_id) is None:
+            return 0
         await self.db._exec("DELETE FROM aq_plan WHERE tank_id = ?", (tank_id,))
         for it in items:
             await self.add_item(tank_id, it["title"], it["time"], it["days"], it.get("kind", "other"))
         return len(items)
 
-    async def tasks_for(self, day: datetime.date) -> list[ScheduleItem]:
-        return [i for i in await self.schedule() if day.weekday() in i.days]
+    async def tasks_for(self, day: datetime.date, user_id: int | None = None) -> list[ScheduleItem]:
+        """Пункты графика на день; с user_id — только его и общие."""
+        return [i for i in await self.schedule() if day.weekday() in i.days
+                and (user_id is None or i.assignee_id in (None, user_id))]
 
     async def task_name(self, item: ScheduleItem) -> str:
         tank = await self.tank(item.tank_id)
@@ -318,27 +427,41 @@ class Aquarium:
     # ------------------------------------------------------------ задачи
 
     async def save_task(self, key: str, name: str, tank_id: int | None,
-                        now: datetime.datetime | None = None) -> tuple[str, bool]:
+                        now: datetime.datetime | None = None, assignee_id: int | None = None) -> tuple[str, bool]:
         """Создаёт задачу на сегодня. (дата, False) — такая задача сегодня уже была."""
         now = now or self.now()
         date = now.date().isoformat()
         verb = "INSERT OR REPLACE" if key in TEST_TASKS else "INSERT OR IGNORE"
         cur = await self.db._exec(
-            f"{verb} INTO aq_tasks (date, task_id, task_name, tank_id, sent_at, remind_at, overdue_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (date, key, name, tank_id, now.isoformat(),
+            f"{verb} INTO aq_tasks (home_id, date, task_id, task_name, tank_id, assignee_id, sent_at, "
+            "remind_at, overdue_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self.id, date, key, name, tank_id, assignee_id, now.isoformat(),
              (now + REMIND_AFTER).isoformat(), (now + OVERDUE_AFTER).isoformat()),
         )
         return date, cur.rowcount > 0
 
     async def get_task(self, date: str, key: str) -> Row | None:
-        return await self._row("SELECT * FROM aq_tasks WHERE date = ? AND task_id = ?", (date, key))
+        return await self._row("SELECT * FROM aq_tasks WHERE home_id = ? AND date = ? AND task_id = ?",
+                               (self.id, date, key))
+
+    async def add_msg(self, date: str, key: str, user_id: int, message_id: int) -> None:
+        """Запоминает последнее сообщение с кнопками у участника — чтобы потом обновить."""
+        row = await self.get_task(date, key)
+        if row is None:
+            return
+        msgs = json.loads(row["msgs"] or "{}")
+        msgs[str(user_id)] = message_id
+        await self.db._exec("UPDATE aq_tasks SET msgs = ? WHERE id = ?", (json.dumps(msgs), row["id"]))
+
+    @staticmethod
+    def task_msgs(row: Row) -> dict[int, int]:
+        return {int(k): v for k, v in json.loads(row.get("msgs") or "{}").items()}
 
     async def complete(self, date: str, key: str, user_id: int, name: str) -> tuple[Row | None, bool]:
         cur = await self.db._exec(
             "UPDATE aq_tasks SET completed_at = ?, completed_by = ?, completed_by_name = ? "
-            "WHERE date = ? AND task_id = ? AND completed_at IS NULL AND cant_at IS NULL",
-            (self.now().isoformat(), user_id, name, date, key),
+            "WHERE home_id = ? AND date = ? AND task_id = ? AND completed_at IS NULL AND cant_at IS NULL",
+            (self.now().isoformat(), user_id, name, self.id, date, key),
         )
         return await self.get_task(date, key), cur.rowcount > 0
 
@@ -350,22 +473,22 @@ class Aquarium:
         overdue_at = max(overdue_at_of(row), remind_at + REMIND_AFTER)
         await self.db._exec(
             "UPDATE aq_tasks SET remind_at = ?, reminded = 0, overdue_at = ?, "
-            "snooze_count = snooze_count + 1 WHERE date = ? AND task_id = ?",
-            (remind_at.isoformat(), overdue_at.isoformat(), date, key),
+            "snooze_count = snooze_count + 1 WHERE id = ?",
+            (remind_at.isoformat(), overdue_at.isoformat(), row["id"]),
         )
         return await self.get_task(date, key), True
 
     async def cant(self, date: str, key: str, name: str, reason: str) -> tuple[Row | None, bool]:
         cur = await self.db._exec(
             "UPDATE aq_tasks SET cant_at = ?, cant_reason = ?, cant_by_name = ? "
-            "WHERE date = ? AND task_id = ? AND completed_at IS NULL AND cant_at IS NULL",
-            (self.now().isoformat(), reason, name, date, key),
+            "WHERE home_id = ? AND date = ? AND task_id = ? AND completed_at IS NULL AND cant_at IS NULL",
+            (self.now().isoformat(), reason, name, self.id, date, key),
         )
         return await self.get_task(date, key), cur.rowcount > 0
 
     def _no_tests(self) -> tuple[str, tuple]:
         marks = ", ".join("?" for _ in TEST_TASKS)
-        return f"task_id NOT IN ({marks})", tuple(TEST_TASKS)
+        return f"home_id = ? AND task_id NOT IN ({marks})", (self.id, *TEST_TASKS)
 
     async def day_tasks(self, date: str) -> list[Row]:
         cond, params = self._no_tests()
@@ -374,8 +497,8 @@ class Aquarium:
 
     async def pending(self, date: str) -> list[Row]:
         return await self._rows(
-            "SELECT * FROM aq_tasks WHERE date = ? AND completed_at IS NULL AND cant_at IS NULL "
-            "ORDER BY sent_at", (date,)
+            "SELECT * FROM aq_tasks WHERE home_id = ? AND date = ? AND completed_at IS NULL "
+            "AND cant_at IS NULL ORDER BY sent_at", (self.id, date)
         )
 
     async def overdue(self, now: datetime.datetime, include_test: bool = True) -> list[Row]:
@@ -384,7 +507,8 @@ class Aquarium:
 
     async def set_flag(self, date: str, key: str, column: str) -> None:
         assert column in ("reminded", "overdue_notified")
-        await self.db._exec(f"UPDATE aq_tasks SET {column} = 1 WHERE date = ? AND task_id = ?", (date, key))
+        await self.db._exec(f"UPDATE aq_tasks SET {column} = 1 WHERE home_id = ? AND date = ? AND task_id = ?",
+                            (self.id, date, key))
 
     async def since(self, start: str, tank_id: int | None = None) -> list[Row]:
         cond, params = self._no_tests()
@@ -395,11 +519,12 @@ class Aquarium:
             (start, *params),
         )
 
-    async def insert_overdue_test(self, now: datetime.datetime) -> None:
+    async def insert_overdue_test(self, now: datetime.datetime, user_id: int | None = None) -> None:
         """Тестовая задача, «отправленная» 2 часа назад: напоминание и просрочка придут сразу."""
         await self.db._exec(
-            "INSERT OR REPLACE INTO aq_tasks (date, task_id, task_name, sent_at) VALUES (?, ?, ?, ?)",
-            (now.date().isoformat(), "overdue_test", TEST_TASKS["overdue_test"],
+            "INSERT OR REPLACE INTO aq_tasks (home_id, date, task_id, task_name, assignee_id, sent_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (self.id, now.date().isoformat(), "overdue_test", TEST_TASKS["overdue_test"], user_id,
              (now - datetime.timedelta(hours=2)).isoformat()),
         )
 
@@ -423,15 +548,17 @@ class Aquarium:
         return current, best
 
     async def achieved(self) -> list[int]:
-        return [r[0] for r in await self.db._fetchall("SELECT streak FROM aq_achievements ORDER BY streak")]
+        return [r[0] for r in await self.db._fetchall(
+            "SELECT streak FROM aq_achievements WHERE home_id = ? ORDER BY streak", (self.id,))]
 
     async def award(self, today: str) -> list[int]:
         current, _ = await self.streaks(today)
         have = set(await self.achieved())
         new = [m for m in ACHIEVEMENTS if current >= m and m not in have]
         for m in new:
-            await self.db._exec("INSERT OR IGNORE INTO aq_achievements (streak, achieved_at) VALUES (?, ?)",
-                                (m, self.now().isoformat()))
+            await self.db._exec(
+                "INSERT OR IGNORE INTO aq_achievements (home_id, streak, achieved_at) VALUES (?, ?, ?)",
+                (self.id, m, self.now().isoformat()))
         return new
 
     async def stats_text(self, today: datetime.date, days: int = 7) -> str:
@@ -448,7 +575,7 @@ class Aquarium:
             avg = int(sum(d.total_seconds() for d in reaction) / len(reaction) // 60)
             lines.append(f"🕐 Среднее время реакции: {avg} мин")
         lines += [
-            f"⏰ Откладывал: {sum(r['snooze_count'] or 0 for r in rows)} р.",
+            f"⏰ Откладывали: {sum(r['snooze_count'] or 0 for r in rows)} р.",
             f"🚫 Пропущено с причиной: {len(cant)}",
             f"❌ Не выполнено: {len(rows) - len(done) - len(cant)}",
         ]
@@ -457,6 +584,12 @@ class Aquarium:
             if own:
                 ok = sum(1 for r in own if r["completed_at"])
                 lines.append(f"   {_e(tank.label)}: {ok}/{len(own)}")
+        if len(await self.members()) > 1 and done:
+            by: dict[str, int] = {}
+            for r in done:
+                by[r["completed_by_name"] or "?"] = by.get(r["completed_by_name"] or "?", 0) + 1
+            lines.append("👥 Кто сделал: " + ", ".join(f"{_e(n)} — {c}" for n, c in
+                                                       sorted(by.items(), key=lambda x: -x[1])))
         current, best = await self.streaks(today.isoformat())
         lines += ["", f"🔥 Текущая серия: {current} дн.", f"🏆 Лучшая серия: {best} дн."]
         if achieved := await self.achieved():
