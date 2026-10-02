@@ -1,4 +1,4 @@
-"""Агент Windows (через общую папку), /logs /restart /power, бережный режим P100, ночная выгрузка."""
+"""Агент хоста (через общую папку), /logs /restart /power, бережный режим P100, ночная выгрузка."""
 
 import asyncio
 import datetime
@@ -16,7 +16,7 @@ from .conftest import ADMIN, FRIEND
 
 
 class FakeAgent:
-    """Отвечает на запросы в папке, как windows/fox-agent.ps1."""
+    """Отвечает на запросы в папке, как linux/fox-agent.py."""
 
     def __init__(self, folder) -> None:
         self.folder = folder
@@ -71,7 +71,7 @@ async def test_logs_restart_ps_power(agent_env):
     await env.send(ADMIN, "/power 150")
     await env.send(ADMIN, "/power")
     assert "лимит 250 из 250" in env.last_text()
-    assert env.agent.seen == [("logs", ["speech", "30"]), ("restart", ["speech"]), ("ollama-restart", []),
+    assert env.agent.seen == [("logs", ["speech", "30"]), ("restart", ["speech"]), ("restart", ["ollama"]),
                               ("ps", []), ("power", ["150"])]
     await env.send(FRIEND, "/restart bot")
     assert len(env.agent.seen) == 5

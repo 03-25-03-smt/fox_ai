@@ -121,7 +121,7 @@ async def build_status(app: App) -> str:
 
     gpus = await query_gpus(s.gpu_stats_file)
     if gpus is None:
-        lines.append("\n<b>GPU:</b> нет данных (nvidia-smi недоступен или не запущен windows/gpu-stats.ps1)")
+        lines.append("\n<b>GPU:</b> нет данных (nvidia-smi недоступен или не запущен агент fox-agent)")
     else:
         lines.append("\n<b>GPU:</b>")
         for g in gpus:

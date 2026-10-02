@@ -77,7 +77,7 @@ ADMIN_HELP = (
     "/adduser &lt;id&gt; [имя] · /deluser &lt;id&gt; · /users\n"
     "/status — GPU, очередь, модели · /backup — бэкап БД\n"
     "/pull &lt;модель&gt; · /rm &lt;модель&gt; · /bench — скачать, удалить, сравнить скорость\n"
-    "/logs &lt;сервис&gt; · /restart &lt;сервис&gt; · /ps · /power [Вт] — через агент Windows\n"
+    "/logs &lt;сервис&gt; · /restart &lt;сервис&gt; · /ps · /power [Вт] — через агент хоста\n"
     "/reindex — переиндексировать базу знаний\n"
     "Документ с подписью <code>/kb</code> — в общую базу знаний\n"
     "/allowchat · /denychat — пустить/убрать всех участников группы"

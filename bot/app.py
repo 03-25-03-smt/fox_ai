@@ -71,8 +71,9 @@ class App:
     started_at: float = field(default_factory=time.time)
     bot_username: str = ""
     background: set[asyncio.Task] = field(default_factory=set)
-    last_gpu_alert: float = 0.0
-    host: object | None = None  # host.HostAgent: команды агенту на Windows
+    # -inf: первое предупреждение о перегреве уходит сразу, даже в первые 30 минут после загрузки ПК
+    last_gpu_alert: float = float("-inf")
+    host: object | None = None  # host.HostAgent: команды агенту на хосте
     throttled: bool = False  # бережный режим из-за перегрева включён
 
     @property

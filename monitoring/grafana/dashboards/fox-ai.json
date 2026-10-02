@@ -268,7 +268,7 @@
   },
   {
    "type": "stat",
-   "title": "Агент Windows",
+   "title": "Агент хоста",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"

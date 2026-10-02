@@ -1,4 +1,4 @@
-"""Метрики Prometheus: запросы, скорость моделей, очередь, GPU (из снимка gpu-stats.ps1).
+"""Метрики Prometheus: запросы, скорость моделей, очередь, GPU (из снимка агента хоста).
 
 HTTP-эндпоинт /metrics поднимается на METRICS_PORT внутри docker-сети (наружу не публикуется),
 его опрашивает сервис prometheus, графики — в Grafana.
@@ -49,7 +49,7 @@ class AppCollector:
         yield GaugeMetricFamily("fox_throttled", "Бережный режим из-за перегрева", value=int(app.throttled))
         yield GaugeMetricFamily("fox_uptime_seconds", "Аптайм бота", value=time.time() - app.started_at)
         host = app.host
-        yield GaugeMetricFamily("fox_host_agent_up", "Агент Windows отвечает",
+        yield GaugeMetricFamily("fox_host_agent_up", "Агент хоста отвечает",
                                 value=int(bool(host and host.alive)))
 
         gpus = read_stats_file(app.settings.gpu_stats_file) if app.settings.gpu_stats_file else None

@@ -160,7 +160,7 @@ def test_gpu_stats_file(tmp_path):
 
     path = tmp_path / "gpu.csv"
     assert read_stats_file(str(path)) is None  # файла ещё нет
-    # Как пишет PowerShell 5: BOM и CRLF
+    # Файл с BOM и CRLF тоже читается
     path.write_bytes("\ufeff0, Tesla P100-PCIE-16GB, 64, 90, 9000, 16384, 180.5, [N/A]\r\n"
                      "1, NVIDIA GeForce RTX 3070, 50, 5, 700, 8192, 25.0, 30\r\n"
                      "2, NVIDIA GeForce GTX 1050, 40, 0, 300, 2048, [N/A], 20\r\n".encode())

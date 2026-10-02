@@ -1,10 +1,9 @@
 """Состояние видеокарт.
 
 Два источника:
-- файл со снимком `nvidia-smi` (GPU_STATS_FILE). На Windows бот живёт в Docker/WSL2 и
-  не видит P100 (она в режиме TCC), поэтому снимок раз в 20 с пишет хост —
-  скрипт windows/gpu-stats.ps1;
-- сам `nvidia-smi`, если он доступен (запуск без Docker или на Linux).
+- файл со снимком `nvidia-smi` (GPU_STATS_FILE). Контейнер бота видеокарт не получает,
+  поэтому снимок всех карт раз в 20 с пишет агент на хосте — linux/fox-agent.py;
+- сам `nvidia-smi`, если он доступен (запуск без Docker).
 """
 
 import asyncio
@@ -58,7 +57,7 @@ def read_stats_file(path: str, max_age: float = STATS_MAX_AGE) -> list[GpuInfo] 
     try:
         if time.time() - file.stat().st_mtime > max_age:
             return None
-        # utf-8-sig: PowerShell 5 любит дописывать BOM
+        # utf-8-sig: на случай файла с BOM
         gpus = parse_nvidia_smi(file.read_text(encoding="utf-8-sig", errors="replace"))
     except OSError:
         return None

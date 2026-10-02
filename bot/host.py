@@ -1,12 +1,13 @@
-"""Связь с агентом на Windows (windows/fox-agent.ps1) через общую папку.
+"""Связь с агентом на хосте (linux/fox-agent.py) через общую папку.
 
 Бот кладёт запрос requests/<id>.json, агент выполняет команду из своего белого списка
-(логи и перезапуск контейнеров, лимит мощности P100, перезапуск Ollama) и пишет ответ в
+(логи и перезапуск контейнеров, лимит мощности P100) и пишет ответ в
 responses/<id>.json. Сетевого порта нет, Docker-сокет в контейнер не пробрасывается.
 Агент раз в 15 с обновляет status.json — по нему бот понимает, что агент жив.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-COMMANDS = {"logs", "restart", "ps", "power", "ollama-restart"}
+COMMANDS = {"logs", "restart", "ps", "power"}
 SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
 STATUS_MAX_AGE = 60.0
 
@@ -54,7 +55,7 @@ class HostAgent:
         if cmd not in COMMANDS:
             raise HostError(f"неизвестная команда {cmd}")
         if not self.alive:
-            raise HostError("агент на Windows не запущен (windows\\fox-agent.ps1, см. README)")
+            raise HostError("агент на хосте не запущен (sudo systemctl status fox-agent, см. README)")
         req_dir, resp_dir = self.folder / "requests", self.folder / "responses"
         req_dir.mkdir(parents=True, exist_ok=True)
         rid = uuid.uuid4().hex
@@ -71,7 +72,9 @@ class HostAgent:
                     data = json.loads(resp.read_text(encoding="utf-8-sig"))
                 except ValueError:
                     continue  # ещё пишется
-                resp.unlink(missing_ok=True)
+                # Папку ответов пишет только агент (root): удалить может не получиться — он уберёт сам
+                with contextlib.suppress(OSError):
+                    resp.unlink()
                 return HostResult(bool(data.get("ok")), str(data.get("output") or ""))
         (req_dir / f"{rid}.json").unlink(missing_ok=True)
         raise HostError("агент не ответил вовремя")

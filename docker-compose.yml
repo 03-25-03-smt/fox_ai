@@ -1,12 +1,9 @@
-# Fox AI для Windows: Ollama работает нативно на Windows (на Tesla P100),
-# всё остальное здесь, в Docker Desktop (WSL2).
-#
-# Почему так: P100 в режиме TCC не видна в WSL2/Docker, зато нативный Ollama
-# работает с ней напрямую и читает модели с любого диска без потерь скорости.
-# В контейнерах видны только RTX 3070 и GTX 1050 (они в режиме WDDM):
-#   imagegen → RTX 3070 (GPU_IMAGEGEN), speech → GTX 1050 (GPU_SPEECH).
-# Выбор карты — через CUDA_VISIBLE_DEVICES: Docker Desktop отдаёт контейнеру
-# все карты сразу, а выбор конкретной по device_ids работает не везде.
+# Fox AI на Linux (Ubuntu 24.04): всё в Docker, у каждой задачи своя карта.
+#   ollama   → Tesla P100 (GPU_LLM)      все LLM и эмбеддинги
+#   imagegen → RTX 3070  (GPU_IMAGEGEN) /draw
+#   speech   → GTX 1050  (GPU_SPEECH)   Whisper
+# Карты задаются UUID (GPU-…) или номером из `nvidia-smi -L`; linux/install.sh сам находит их
+# по имени и вписывает UUID в .env. Контейнер видит только свою карту.
 #
 # Сервисы speech и imagegen необязательные: закомментируй их и поставь в .env
 # пустые SPEECH_URL= / IMAGEGEN_URL=.
@@ -21,23 +18,14 @@ x-logging: &logging
     driver: json-file
     options: { max-size: "20m", max-file: "3" }
 
-x-gpu: &gpu
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: all
-            capabilities: [gpu]
-
 networks:
   default: {}
   # Внутренняя сеть без выхода в интернет — для песочницы
   sandbox_net:
     internal: true
 
-# Данные живут внутри диска Docker Desktop (переносится на HDD в настройках).
-# SQLite в named volume надёжнее, чем на папке Windows: там нет нормальных блокировок.
+# Тома Docker живут в data-root Docker — на HDD 1 ТБ (/data/docker, linux/setup-host.sh).
+# Модели Ollama — отдельной папкой OLLAMA_MODELS_DIR (по умолчанию на системном SSD: грузятся быстрее).
 volumes:
   bot_data: {}
   models: {}   # Whisper и SDXL-Turbo (кэш Hugging Face)
@@ -46,6 +34,28 @@ volumes:
   open_webui: {}
 
 services:
+  ollama:
+    image: ollama/ollama:0.35.0
+    restart: unless-stopped
+    <<: *logging
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_LLM:?задай GPU_LLM в .env (UUID Tesla P100; linux/install.sh найдёт сам)}"]
+              capabilities: [gpu]
+    # Только localhost: у Ollama нет авторизации. Бот и Open WebUI ходят по docker-сети
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-/var/lib/fox-ollama}:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=${MAX_CONCURRENT:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-3}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-30m}
+
   searxng:
     image: searxng/searxng:2026.9.29-f5035873a
     restart: unless-stopped
@@ -72,28 +82,38 @@ services:
   speech:
     build: ./services/speech
     restart: unless-stopped
-    <<: [*hardening, *logging, *gpu]
+    <<: [*hardening, *logging]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_SPEECH:?задай GPU_SPEECH в .env (UUID GTX 1050; linux/install.sh найдёт сам)}"]
+              capabilities: [gpu]
     volumes:
       - models:/models
     environment:
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE=${WHISPER_COMPUTE:-int8}
-      - CUDA_DEVICE_ORDER=PCI_BUS_ID
-      - CUDA_VISIBLE_DEVICES=${GPU_SPEECH:-0}
 
   imagegen:
     build: ./services/imagegen
     restart: unless-stopped
-    <<: [*hardening, *logging, *gpu]
+    <<: [*hardening, *logging]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_IMAGEGEN:?задай GPU_IMAGEGEN в .env (UUID RTX 3070; linux/install.sh найдёт сам)}"]
+              capabilities: [gpu]
     volumes:
       - models:/models
     environment:
       - IMAGEGEN_MODEL=${IMAGEGEN_MODEL:-stabilityai/sdxl-turbo}
       - IMAGEGEN_CPU_OFFLOAD=1
       - IDLE_UNLOAD_SECONDS=120
-      - CUDA_DEVICE_ORDER=PCI_BUS_ID
-      - CUDA_VISIBLE_DEVICES=${GPU_IMAGEGEN:-0}
 
   bot:
     build: .
@@ -101,8 +121,7 @@ services:
     <<: [*hardening, *logging]
     env_file: .env
     environment:
-      # Ollama запущен на самой Windows; host.docker.internal — это хост
-      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_URL=http://ollama:11434
       - SEARXNG_URL=http://searxng:8080
       - SANDBOX_URL=http://sandbox:8000
       - SPEECH_URL=${SPEECH_URL-http://speech:8000}
@@ -110,11 +129,11 @@ services:
       - DB_PATH=/app/data/fox_ai.sqlite3
       - KNOWLEDGE_DIR=/app/knowledge
       - BACKUP_DIR=/app/backups
-      # Температуры всех трёх карт пишет на хосте windows/gpu-stats.ps1
+      # Температуры всех трёх карт пишет агент на хосте (linux/fox-agent.py): бот GPU не видит
       - GPU_STATS_FILE=/app/gpu/gpu.csv
       # /metrics для Prometheus — только внутри docker-сети, наружу порт не публикуется
       - METRICS_PORT=9101
-      # Обмен с агентом Windows (windows/fox-agent.ps1): /logs, /restart, /power
+      # Обмен с агентом хоста (linux/fox-agent.py): /logs, /restart, /power
       - HOST_DIR=/app/host
     volumes:
       - bot_data:/app/data
@@ -124,11 +143,12 @@ services:
       - ${BACKUP_HOST_DIR:-./data/backups}:/app/backups
     networks: [default, sandbox_net]
     depends_on:
+      - ollama
       - searxng
       - sandbox
 
   # ---------------------------------------------------------------- мониторинг (профиль monitoring)
-  # Графики температуры, VRAM, скорости и запросов: http://localhost:3000 (только с этого ПК)
+  # Графики температуры, VRAM, скорости и запросов: http://localhost:3000 (только с этого ПК / через SSH-туннель)
 
   prometheus:
     image: prom/prometheus:v3.15.0
@@ -177,7 +197,7 @@ services:
     ports:
       - "127.0.0.1:3001:8080"
     environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_BASE_URL=http://ollama:11434
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
       - DEFAULT_USER_ROLE=pending
       - ANONYMIZED_TELEMETRY=false
@@ -186,3 +206,4 @@ services:
       - DO_NOT_TRACK=true
     volumes:
       - open_webui:/app/backend/data
+    depends_on: [ollama]

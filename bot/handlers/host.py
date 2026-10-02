@@ -1,4 +1,4 @@
-"""Команды для хоста Windows через агента: /logs, /restart, /ps, /power (только админ)."""
+"""Команды хосту через агента: /logs, /restart, /ps, /power (только админ)."""
 
 import html
 
@@ -18,7 +18,7 @@ MAX_INLINE = 3500
 
 async def _run(message: Message, app: App, cmd: str, *args: str, timeout: float = 60.0):
     if app.host is None:
-        await message.answer("🖥 Агент Windows не настроен (HOST_DIR, windows\\fox-agent.ps1 — см. README).")
+        await message.answer("🖥 Агент хоста не настроен (HOST_DIR, linux/fox-agent.py — см. README).")
         return None
     try:
         result = await app.host.run(cmd, *args, timeout=timeout)
@@ -58,8 +58,7 @@ async def cmd_restart(message: Message, command: CommandObject, app: App) -> Non
     if service == "bot":
         await message.answer("🔄 Перезапускаю себя — вернусь через ~20 секунд.")
     status = await message.answer(f"🔄 Перезапускаю {service}…")
-    cmd, args = ("ollama-restart", ()) if service == "ollama" else ("restart", (service,))
-    result = await _run(message, app, cmd, *args, timeout=180)
+    result = await _run(message, app, "restart", service, timeout=180)
     if result is not None:
         await status.edit_text(f"{'✅' if result.ok else '⚠️'} {service}: {result.output.strip()[:500] or 'готово'}")
 
@@ -80,7 +79,7 @@ async def cmd_power(message: Message, command: CommandObject, app: App) -> None:
     if not arg:
         status = app.host.status() if app.host else None
         if status is None:
-            await message.answer("🖥 Агент Windows не запущен.")
+            await message.answer("🖥 Агент хоста не запущен (sudo systemctl status fox-agent).")
             return
         mode = "🌡 бережный режим (перегрев)" if app.throttled else "обычный режим"
         await message.answer(f"⚡ {status.get('power', '?')} · {mode}. Слотов генерации: {app.queue.limit}")
